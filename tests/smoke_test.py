@@ -42,7 +42,7 @@ QMessageBox.critical = staticmethod(
 from pdf_tool.app import MainWindow  # noqa: E402
 from pdf_tool.viewer.render import make_key  # noqa: E402
 from pdf_tool.viewer.view import (  # noqa: E402
-    MODE_BOOK, MODE_CONTINUOUS, MODE_SINGLE, TOOL_ADD_IMAGE,
+    MODE_BOOK, MODE_CONTINUOUS, MODE_SINGLE, TOOL_ADD_IMAGE, TOOL_ADD_TEXT,
 )
 
 PDF = os.path.join(ROOT, "examples", "test.pdf")
@@ -357,6 +357,31 @@ def main():
             failures.append("editing: il cambio di strumento non ha confermato l'immagine in sospeso")
         else:
             print("OK: editing - immagine impressa alla conferma (cambio strumento)")
+
+        # Strumento "a un colpo": dopo l'inserimento di testo, lo strumento
+        # (e il pulsante corrispondente) devono disattivarsi da soli, così
+        # il clic successivo sposta l'annotazione invece di aprirne una
+        # nuova (comportamento richiesto esplicitamente).
+        img2_window._tool_actions[TOOL_ADD_TEXT].setChecked(True)
+        img2_window.view._open_text_editor(0, (60, 500))
+        img2_window.view._text_editor.setPlainText("Testo a un colpo")
+        img2_window.view._close_text_editor(commit=True)
+        if img2_window.view.tool is not None:
+            failures.append(
+                f"editing: lo strumento non si è disattivato da solo dopo l'inserimento "
+                f"(tool={img2_window.view.tool})")
+        elif img2_window._tool_actions[TOOL_ADD_TEXT].isChecked():
+            failures.append("editing: il pulsante 'Aggiungi testo' è rimasto spuntato")
+        else:
+            print("OK: editing - strumento 'Aggiungi testo' si disattiva da solo dopo l'inserimento")
+
+        # Organizzatore pagine facilmente raggiungibile
+        img2_window.open_page_organizer()
+        if not img2_window.sidebar_dock.isVisible() or \
+                img2_window._sidebar_tabs.currentIndex() != img2_window._pages_tab_index:
+            failures.append("editing: open_page_organizer non apre il pannello sulla scheda Pagine")
+        else:
+            print("OK: editing - open_page_organizer apre direttamente il pannello Pagine")
 
         # Editor di testo inline: apertura, digitazione, chiusura per
         # perdita del focus (commit) -> deve comparire una nuova annotazione

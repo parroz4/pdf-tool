@@ -110,6 +110,7 @@ class PdfView(QAbstractScrollArea):
     modeChanged = Signal(str)           # nome della modalità corrente
     editRequested = Signal(str, int, object)  # tool, pagina, (x_pt, y_pt)
     documentChanged = Signal()          # una modifica è stata applicata al documento
+    toolChanged = Signal(object)        # str (TOOL_*) o None; anche quando si autodisattiva
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -489,6 +490,7 @@ class PdfView(QAbstractScrollArea):
         self.viewport().setCursor(
             Qt.CursorShape.CrossCursor if tool else Qt.CursorShape.ArrowCursor)
         self.viewport().update()
+        self.toolChanged.emit(tool)
 
     def commit_pending_edits(self) -> None:
         """Converte in modifiche reali ciò che è ancora "in sospeso": va
@@ -608,6 +610,11 @@ class PdfView(QAbstractScrollArea):
                 pi["x"] - ox + pi["w"], pi["y"] - oy + pi["h"])
             self.doc.add_image(pi["page"], rect_pt, pi["path"])
             self.refresh_after_edit()
+            if self.tool == TOOL_ADD_IMAGE:
+                # Strumento "a un colpo": inserita l'immagine si torna alla
+                # sola visualizzazione, così il clic successivo la sposta
+                # invece di aprirne un'altra.
+                self.set_tool(None)
 
     def _cancel_pending_image(self) -> None:
         if self._pending_image is not None:
@@ -661,6 +668,10 @@ class PdfView(QAbstractScrollArea):
         if commit and text.strip() and self.doc is not None:
             self.doc.add_freetext(page, rect_pt, text)
             self.refresh_after_edit()
+            if self.tool == TOOL_ADD_TEXT:
+                # Strumento "a un colpo": come per le immagini, dopo
+                # l'inserimento si torna alla sola visualizzazione.
+                self.set_tool(None)
         self.setFocus()
 
     # -------------------------------------------------------------- ricerca

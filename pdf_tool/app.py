@@ -84,14 +84,16 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.view, 1)
         self.setCentralWidget(central)
 
-        # Pannello laterale: indice/segnalibri e miniature (nascosto di default)
+        # Pannello laterale: indice/segnalibri e organizzatore pagine
+        # (nascosto di default)
         self.outline_panel = OutlinePanel(self)
         self.thumb_panel = ThumbnailPanel(self)
-        sidebar_tabs = QTabWidget(self)
-        sidebar_tabs.addTab(self.outline_panel, "Indice")
-        sidebar_tabs.addTab(self.thumb_panel, "Miniature")
+        self._sidebar_tabs = QTabWidget(self)
+        self._sidebar_tabs.addTab(self.outline_panel, "Indice")
+        self._sidebar_tabs.addTab(self.thumb_panel, "Pagine")
+        self._pages_tab_index = 1
         self.sidebar_dock = QDockWidget("Pannello", self)
-        self.sidebar_dock.setWidget(sidebar_tabs)
+        self.sidebar_dock.setWidget(self._sidebar_tabs)
         self.sidebar_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable)
@@ -109,6 +111,7 @@ class MainWindow(QMainWindow):
             lambda cur, tot: self.thumb_panel.set_current_page(cur - 1))
         self.view.editRequested.connect(self._on_edit_requested)
         self.view.documentChanged.connect(self._update_title)
+        self.view.toolChanged.connect(self._on_tool_changed)
         self._page_clipboard: bytes | None = None  # copia/taglia pagine (tra sidebar e app)
 
         # Statusbar: modalità, pagina e zoom
@@ -250,6 +253,9 @@ class MainWindow(QMainWindow):
             self._tool_actions[tool] = action
 
         m_doc = bar.addMenu("&Documento")
+        self._organize_action = act(
+            m_doc, "&Organizza pagine (miniature)…", self.open_page_organizer, "Ctrl+Shift+O")
+        m_doc.addSeparator()
         self._merge_action = act(m_doc, "&Unisci PDF…", self.merge_pdf_dialog)
         act(m_doc, "Elimina pagina &corrente", self._delete_current_page)
         act(m_doc, "Incolla pagine in fondo", self._paste_at_end)
@@ -260,6 +266,14 @@ class MainWindow(QMainWindow):
             QKeySequence.StandardKey.SaveAs)
 
         self._setup_toolbar()
+
+    def open_page_organizer(self) -> None:
+        """Apre il pannello laterale sulla scheda "Pagine": qui si
+        riordina/copia/taglia/incolla/elimina, e si inseriscono PDF tra due
+        pagine (clic destro su una miniatura)."""
+        self.sidebar_dock.show()
+        self._sidebar_tabs.setCurrentIndex(self._pages_tab_index)
+        self.thumb_panel.setFocus()
 
     def _setup_toolbar(self):
         # Riusa le stesse QAction del menu: stato (spuntato/abilitato) e
@@ -277,6 +291,7 @@ class MainWindow(QMainWindow):
         toolbar.addAction(self._tool_actions[TOOL_ADD_TEXT])
         toolbar.addAction(self._tool_actions[TOOL_ADD_IMAGE])
         toolbar.addSeparator()
+        toolbar.addAction(self._organize_action)
         toolbar.addAction(self._merge_action)
         toolbar.addAction(self._save_action)
 
@@ -386,6 +401,21 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(hints[tool])
         elif self.view.tool == tool:
             self.view.set_tool(None)
+            self.statusBar().clearMessage()
+
+    def _on_tool_changed(self, tool) -> None:
+        """Tiene i pulsanti allineati anche quando lo strumento si
+        autodisattiva dopo un inserimento (non solo quando l'utente lo
+        spegne a mano dal pulsante)."""
+        if not hasattr(self, "_tool_actions"):
+            return
+        for t, action in self._tool_actions.items():
+            should_check = (t == tool)
+            if action.isChecked() != should_check:
+                action.blockSignals(True)
+                action.setChecked(should_check)
+                action.blockSignals(False)
+        if tool is None:
             self.statusBar().clearMessage()
 
     def _deactivate_tools(self) -> None:

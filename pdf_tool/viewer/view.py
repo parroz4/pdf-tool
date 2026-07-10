@@ -358,6 +358,18 @@ class PdfView(QAbstractScrollArea):
             # quindi indice globale e indice di layout coincidono.
             self.verticalScrollBar().setValue(self._row_y[row] - MARGIN)
 
+    def next_page(self) -> None:
+        if self._paged():
+            self._flip(1)
+        else:
+            self.goto_page(self.current_page() + 1)
+
+    def prev_page(self) -> None:
+        if self._paged():
+            self._flip(-1)
+        else:
+            self.goto_page(self.current_page() - 1)
+
     # -------------------------------------------------------------- ricerca
 
     def set_search_results(self, hits: dict[int, list]) -> None:

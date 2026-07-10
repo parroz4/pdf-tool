@@ -12,7 +12,7 @@ import os
 import sys
 
 from PySide6.QtCore import Qt, QThreadPool
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QToolButton, QVBoxLayout, QWidget,
@@ -87,33 +87,81 @@ class MainWindow(QMainWindow):
         self._search_generation = 0
         self._last_query = ""
 
-        self._setup_shortcuts()
+        self._setup_menu()
+        self._setup_search_bar_keys()
 
         if path:
             self.open_path(path)
         else:
-            self.statusBar().showMessage("Ctrl+O per aprire un PDF")
+            self.statusBar().showMessage("Ctrl+O per aprire un PDF, o trascina qui un file")
+
+    # ------------------------------------------------------------------ menu
+
+    def _setup_menu(self):
+        def act(menu, text, slot, shortcut=None, checkable=False, group=None):
+            action = QAction(text, self)
+            if shortcut is not None:
+                action.setShortcut(QKeySequence(shortcut))
+                action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+            action.setCheckable(checkable)
+            if group is not None:
+                group.addAction(action)
+            # lambda: le slot non devono ricevere il bool `checked` di triggered
+            action.triggered.connect(lambda checked=False, s=slot: s())
+            menu.addAction(action)
+            return action
+
+        bar = self.menuBar()
+
+        m_file = bar.addMenu("&File")
+        act(m_file, "&Apri…", self.open_dialog, QKeySequence.StandardKey.Open)
+        m_file.addSeparator()
+        act(m_file, "&Esci", self.close, QKeySequence.StandardKey.Quit)
+
+        m_view = bar.addMenu("&Visualizza")
+        mode_group = QActionGroup(self)
+        self._mode_actions = {}
+        for mode, label, seq in (
+                (MODE_SINGLE, "Pagina &singola", "Ctrl+6"),
+                (MODE_CONTINUOUS, "S&corrimento continuo", "Ctrl+7"),
+                (MODE_BOOK, "&Libro (pagine affiancate)", "Ctrl+8")):
+            self._mode_actions[mode] = act(
+                m_view, label, lambda m=mode: self.view.set_mode(m),
+                seq, checkable=True, group=mode_group)
+        self._mode_actions[self.view.mode].setChecked(True)
+        self.view.modeChanged.connect(
+            lambda _: self._mode_actions[self.view.mode].setChecked(True))
+        m_view.addSeparator()
+        act(m_view, "&Ingrandisci", self.view.zoom_in, "Ctrl++")
+        act(m_view, "&Riduci", self.view.zoom_out, "Ctrl+-")
+        act(m_view, "Zoom &100%", lambda: self.view.set_zoom(1.0), "Ctrl+1")
+        act(m_view, "Adatta &larghezza", self.view.fit_width, "Ctrl+2")
+        act(m_view, "Adatta &pagina", self.view.fit_page, "Ctrl+0")
+
+        m_go = bar.addMenu("V&ai")
+        act(m_go, "Pagina &successiva", self.view.next_page)
+        act(m_go, "Pagina &precedente", self.view.prev_page)
+        m_go.addSeparator()
+        act(m_go, "P&rima pagina", lambda: self.view.goto_page(0))
+        act(m_go, "&Ultima pagina", self._goto_last_page)
+        m_go.addSeparator()
+        act(m_go, "&Vai a pagina…", self.goto_page_dialog, "Ctrl+G")
+
+        m_search = bar.addMenu("&Cerca")
+        act(m_search, "&Cerca nel documento…", self.show_search,
+            QKeySequence.StandardKey.Find)
+        act(m_search, "Risultato &successivo", lambda: self._jump_hit(1),
+            QKeySequence.StandardKey.FindNext)
+        act(m_search, "Risultato &precedente", lambda: self._jump_hit(-1),
+            QKeySequence.StandardKey.FindPrevious)
+
+    def _goto_last_page(self):
+        if self.view.doc is not None:
+            self.view.goto_page(self.view.doc.page_count - 1)
 
     # ------------------------------------------------------------- shortcuts
 
-    def _setup_shortcuts(self):
-        def sc(sequence, slot):
-            shortcut = QShortcut(QKeySequence(sequence), self)
-            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-            shortcut.activated.connect(slot)
-            return shortcut
-
-        sc(QKeySequence.StandardKey.Open, self.open_dialog)         # Ctrl+O
-        sc(QKeySequence.StandardKey.Quit, self.close)               # Ctrl+Q
-        sc("Ctrl+G", self.goto_page_dialog)
-        # Modalità di visualizzazione (stesse scorciatoie di SumatraPDF)
-        sc("Ctrl+6", lambda: self.view.set_mode(MODE_SINGLE))
-        sc("Ctrl+7", lambda: self.view.set_mode(MODE_CONTINUOUS))
-        sc("Ctrl+8", lambda: self.view.set_mode(MODE_BOOK))
-        sc(QKeySequence.StandardKey.Find, self.show_search)         # Ctrl+F
-        sc(QKeySequence.StandardKey.FindNext, lambda: self._jump_hit(1))    # F3
-        sc(QKeySequence.StandardKey.FindPrevious, lambda: self._jump_hit(-1))
-
+    def _setup_search_bar_keys(self):
         self.search_bar.edit.returnPressed.connect(self._search_or_next)
         esc = QShortcut(QKeySequence(Qt.Key.Key_Escape), self.search_bar.edit)
         esc.setContext(Qt.ShortcutContext.WidgetShortcut)

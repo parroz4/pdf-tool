@@ -13,6 +13,10 @@ Tre modalità di visualizzazione (`Ctrl+6/7/8`, come SumatraPDF):
 
 I PDF si aprono anche **trascinandoli sulla finestra**.
 
+Tutte le funzioni sono accessibili dalla **barra dei menu** (File, Visualizza,
+Vai, Cerca); le scorciatoie sono indicate accanto a ogni voce, quindi non
+serve impararle a memoria.
+
 ## Avvio
 
 ```bash

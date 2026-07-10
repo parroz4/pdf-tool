@@ -21,8 +21,8 @@ from __future__ import annotations
 from bisect import bisect_right
 
 from PySide6.QtCore import QRectF, Qt, QThreadPool, Signal
-from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QAbstractScrollArea
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QAbstractScrollArea, QTextEdit
 
 from .document import Document
 from .render import LRUImageCache, RenderSignals, RenderTask, make_key
@@ -40,10 +40,52 @@ HIGHLIGHT = QColor(255, 210, 0, 110)
 HIGHLIGHT_CURRENT = QColor(255, 120, 0, 150)
 WIDGET_HINT = QColor(60, 140, 220, 70)
 WIDGET_HINT_BORDER = QColor(40, 110, 190)
+DRAG_OUTLINE = QColor(230, 150, 20)
+DRAG_FILL = QColor(230, 150, 20, 40)
 
 TOOL_FORM = "form"
 TOOL_ADD_TEXT = "add_text"
 TOOL_ADD_IMAGE = "add_image"
+
+ADD_TEXT_SIZE_PT = (240, 50)  # dimensione di default della casella di testo
+ADD_IMAGE_WIDTH_PT = 140.0    # larghezza di default delle immagini inserite
+
+
+class _InlineTextEdit(QTextEdit):
+    """Editor di testo fluttuante per "Aggiungi testo": si scrive direttamente
+    sopra la pagina invece che in un popup. Si conferma perdendo il focus o
+    con Ctrl+Invio (Invio da solo va a capo, essendo il testo multi-riga);
+    si annulla con Esc."""
+
+    committed = Signal()
+    cancelled = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptRichText(False)
+        self._closing = False
+
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self._emit_once(self.cancelled)
+            return
+        if (event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter)
+                and event.modifiers() & Qt.KeyboardModifier.ControlModifier):
+            self._emit_once(self.committed)
+            return
+        super().keyPressEvent(event)
+
+    def focusOutEvent(self, event) -> None:
+        super().focusOutEvent(event)
+        self._emit_once(self.committed)
+
+    def _emit_once(self, signal) -> None:
+        # Sia Esc sia il focus-out possono arrivare più volte durante la
+        # chiusura (deleteLater non è immediato): il segnale va emesso una
+        # sola volta, altrimenti si rischia un doppio commit.
+        if not self._closing:
+            self._closing = True
+            signal.emit()
 
 FIT_NONE = 0
 FIT_WIDTH = 1
@@ -67,6 +109,7 @@ class PdfView(QAbstractScrollArea):
     zoomChanged = Signal(float)         # fattore di zoom corrente
     modeChanged = Signal(str)           # nome della modalità corrente
     editRequested = Signal(str, int, object)  # tool, pagina, (x_pt, y_pt)
+    documentChanged = Signal()          # una modifica è stata applicata al documento
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -80,6 +123,16 @@ class PdfView(QAbstractScrollArea):
         self.rotation = 0   # 0/90/180/270, in senso orario
         self.tool: str | None = None    # None o uno dei TOOL_*
         self._widget_cache: dict[int, list] = {}  # pagina -> widgets() (per hint)
+
+        # Editing diretto sulla pagina: immagine in attesa di conferma
+        # (trascinabile prima di essere impressa), trascinamento in corso
+        # (di un'annotazione di testo esistente o dell'immagine pendente),
+        # ed editor di testo fluttuante per "Aggiungi testo".
+        self._pending_image: dict | None = None
+        self._drag: dict | None = None
+        self._text_editor: _InlineTextEdit | None = None
+        self._text_editor_page: int | None = None
+        self._text_editor_rect_pt: tuple | None = None
 
         # Raggruppamento pagine -> righe (dipende dalla modalità)
         self._rows: list[list[int]] = []
@@ -127,6 +180,13 @@ class PdfView(QAbstractScrollArea):
         self._wanted = set()
         self._pending.clear()
         self._widget_cache.clear()
+        # Nulla di "in sospeso" sopravvive al cambio di documento: non c'è
+        # più un documento a cui applicarlo.
+        self._pending_image = None
+        self._drag = None
+        if self._text_editor is not None:
+            self._text_editor.deleteLater()
+            self._text_editor = None
         self.clear_search()
         self._last_emitted_page = -1
         self.rotation = 0
@@ -423,11 +483,18 @@ class PdfView(QAbstractScrollArea):
 
     def set_tool(self, tool: str | None) -> None:
         """Attiva uno strumento (TOOL_*) o torna alla sola visualizzazione (None)."""
+        self.commit_pending_edits()
         self.tool = tool
         self._widget_cache.clear()
         self.viewport().setCursor(
             Qt.CursorShape.CrossCursor if tool else Qt.CursorShape.ArrowCursor)
         self.viewport().update()
+
+    def commit_pending_edits(self) -> None:
+        """Converte in modifiche reali ciò che è ancora "in sospeso": va
+        chiamato prima di cambiare strumento/pagina/documento o di salvare."""
+        self._commit_pending_image()
+        self._close_text_editor(commit=True)
 
     def refresh_after_edit(self) -> None:
         """Invalida la cache di rendering dopo un edit che non cambia le pagine."""
@@ -436,6 +503,7 @@ class PdfView(QAbstractScrollArea):
         self._pending.clear()
         self._widget_cache.clear()
         self.viewport().update()
+        self.documentChanged.emit()
 
     def reload_structure(self) -> None:
         """Ricostruisce righe/layout dopo un edit che cambia numero/ordine pagine."""
@@ -452,27 +520,148 @@ class PdfView(QAbstractScrollArea):
         self.viewport().update()
         self._emit_page_changed()
 
-    def _hit_test(self, viewport_pos) -> tuple[int, tuple[float, float]] | None:
-        """Pagina e punto PDF sotto una posizione del viewport, se presenti."""
-        if self.doc is None:
-            return None
-        content_x = viewport_pos.x() + self.horizontalScrollBar().value()
-        content_y = viewport_pos.y() + self.verticalScrollBar().value()
+    def _page_at(self, content_x: float, content_y: float):
+        """Pagina sotto una coordinata di contenuto, con la sua origine (x, y)."""
         for li in range(len(self._laid)):
             row_x = self._row_x(li)
             for p in self._rows[self._laid[li]]:
                 _, x_rel, gy, w, h = self._page_geo[p]
                 x, y = row_x + x_rel, gy
                 if x <= content_x < x + w and y <= content_y < y + h:
-                    point = self.doc.to_page_point(
-                        p, content_x - x, content_y - y, self.zoom, self.rotation)
-                    return p, point
+                    return p, x, y, w, h
         return None
+
+    def _page_origin(self, page: int) -> tuple[float, float] | None:
+        """Origine (x, y) di una pagina in coordinate di contenuto, per indice."""
+        geo = self._page_geo.get(page)
+        if geo is None:
+            return None
+        li, x_rel, y, _, _ = geo
+        return self._row_x(li) + x_rel, y
+
+    def _hit_test(self, viewport_pos) -> tuple[int, tuple[float, float]] | None:
+        """Pagina e punto PDF sotto una posizione del viewport, se presenti."""
+        if self.doc is None:
+            return None
+        content_x = viewport_pos.x() + self.horizontalScrollBar().value()
+        content_y = viewport_pos.y() + self.verticalScrollBar().value()
+        hit = self._page_at(content_x, content_y)
+        if hit is None:
+            return None
+        p, x, y, _, _ = hit
+        point = self.doc.to_page_point(p, content_x - x, content_y - y, self.zoom, self.rotation)
+        return p, point
+
+    def _pixel_rect_to_page_rect(self, page: int, x0: float, y0: float,
+                                  x1: float, y1: float) -> tuple[float, float, float, float]:
+        """Converte un rettangolo in pixel (relativo all'origine della pagina)
+        nel corrispondente rettangolo PDF — l'inverso di `Document.to_pixel_rect`."""
+        px0, py0 = self.doc.to_page_point(page, x0, y0, self.zoom, self.rotation)
+        px1, py1 = self.doc.to_page_point(page, x1, y1, self.zoom, self.rotation)
+        return (min(px0, px1), min(py0, py1), max(px0, px1), max(py0, py1))
 
     def _widgets_for(self, page: int) -> list:
         if page not in self._widget_cache:
             self._widget_cache[page] = self.doc.widgets(page) if self.doc else []
         return self._widget_cache[page]
+
+    # ---------------------------------------------------- immagine in sospeso
+
+    def start_image_placement(self, page: int, point_pt: tuple[float, float],
+                               image_path: str) -> None:
+        """Avvia il posizionamento di un'immagine: resta trascinabile finché
+        non viene confermata (clic altrove, cambio strumento, salvataggio)."""
+        if self.doc is None:
+            return
+        self._commit_pending_image()
+        pixmap = QPixmap(image_path)
+        if pixmap.isNull():
+            return
+        w_pt = ADD_IMAGE_WIDTH_PT
+        h_pt = w_pt * pixmap.height() / pixmap.width()
+        page_w, page_h = self.doc.page_sizes[page]
+        x0 = max(0.0, min(point_pt[0], max(0.0, page_w - w_pt)))
+        y0 = max(0.0, min(point_pt[1], max(0.0, page_h - h_pt)))
+        rx0, ry0, rx1, ry1 = self.doc.to_pixel_rect(
+            page, (x0, y0, x0 + w_pt, y0 + h_pt), self.zoom, self.rotation)
+        origin = self._page_origin(page)
+        if origin is None:
+            return
+        ox, oy = origin
+        self._pending_image = {
+            "path": image_path, "page": page, "pixmap": pixmap,
+            "x": ox + min(rx0, rx1), "y": oy + min(ry0, ry1),
+            "w": abs(rx1 - rx0), "h": abs(ry1 - ry0),
+        }
+        self.viewport().update()
+
+    def _commit_pending_image(self) -> None:
+        pi = self._pending_image
+        if pi is None or self.doc is None:
+            return
+        self._pending_image = None
+        origin = self._page_origin(pi["page"])
+        if origin is not None:
+            ox, oy = origin
+            rect_pt = self._pixel_rect_to_page_rect(
+                pi["page"], pi["x"] - ox, pi["y"] - oy,
+                pi["x"] - ox + pi["w"], pi["y"] - oy + pi["h"])
+            self.doc.add_image(pi["page"], rect_pt, pi["path"])
+            self.refresh_after_edit()
+
+    def _cancel_pending_image(self) -> None:
+        if self._pending_image is not None:
+            self._pending_image = None
+            self.viewport().update()
+
+    # -------------------------------------------------------- editor inline
+
+    def _open_text_editor(self, page: int, point_pt: tuple[float, float]) -> None:
+        if self.doc is None:
+            return
+        self.commit_pending_edits()
+        w_pt, h_pt = ADD_TEXT_SIZE_PT
+        page_w, page_h = self.doc.page_sizes[page]
+        x0 = max(0.0, min(point_pt[0], max(0.0, page_w - w_pt)))
+        y0 = max(0.0, min(point_pt[1], max(0.0, page_h - h_pt)))
+        rect_pt = (x0, y0, x0 + w_pt, y0 + h_pt)
+        rx0, ry0, rx1, ry1 = self.doc.to_pixel_rect(page, rect_pt, self.zoom, self.rotation)
+        origin = self._page_origin(page)
+        if origin is None:
+            return
+        ox, oy = origin
+        xoff, yoff = self.horizontalScrollBar().value(), self.verticalScrollBar().value()
+        vx = ox + min(rx0, rx1) - xoff
+        vy = oy + min(ry0, ry1) - yoff
+        vw, vh = abs(rx1 - rx0), abs(ry1 - ry0)
+
+        editor = _InlineTextEdit(self.viewport())
+        editor.setGeometry(round(vx), round(vy), round(vw), round(vh))
+        editor.setStyleSheet(
+            "QTextEdit { background: white; color: black; border: 2px solid #2b6cb0; }")
+        editor.setPlaceholderText("Scrivi qui… (Esc annulla, clic fuori conferma)")
+        editor.committed.connect(lambda: self._close_text_editor(commit=True))
+        editor.cancelled.connect(lambda: self._close_text_editor(commit=False))
+        editor.show()
+        editor.setFocus()
+        self._text_editor = editor
+        self._text_editor_page = page
+        self._text_editor_rect_pt = rect_pt
+
+    def _close_text_editor(self, commit: bool) -> None:
+        editor = self._text_editor
+        if editor is None:
+            return
+        self._text_editor = None
+        text = editor.toPlainText()
+        page, rect_pt = self._text_editor_page, self._text_editor_rect_pt
+        self._text_editor_page = self._text_editor_rect_pt = None
+        editor.hide()
+        editor.deleteLater()
+        if commit and text.strip() and self.doc is not None:
+            self.doc.add_freetext(page, rect_pt, text)
+            self.refresh_after_edit()
+        self.setFocus()
 
     # -------------------------------------------------------------- ricerca
 
@@ -581,6 +770,28 @@ class PdfView(QAbstractScrollArea):
                                    (rect.x1 - rect.x0) * self.zoom,
                                    (rect.y1 - rect.y0) * self.zoom),
                             color)
+
+        # Immagine in attesa di conferma (segue il trascinamento se in corso)
+        if self._pending_image is not None:
+            pi = self._pending_image
+            if self._drag is not None and self._drag["kind"] == "pending_image":
+                px, py = self._drag["x"], self._drag["y"]
+            else:
+                px, py = pi["x"], pi["y"]
+            rect = QRectF(px - xoff, py - yoff, pi["w"], pi["h"])
+            painter.drawPixmap(rect, pi["pixmap"], QRectF(pi["pixmap"].rect()))
+            painter.setPen(QPen(DRAG_OUTLINE, 2, Qt.PenStyle.DashLine))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect)
+
+        # Anteprima del trascinamento di un'annotazione di testo esistente
+        if self._drag is not None and self._drag["kind"] == "annot":
+            d = self._drag
+            rect = QRectF(d["x"] - xoff, d["y"] - yoff, d["w"], d["h"])
+            painter.setPen(QPen(DRAG_OUTLINE, 2, Qt.PenStyle.DashLine))
+            painter.setBrush(DRAG_FILL)
+            painter.drawRect(rect)
+
         painter.end()
 
     # ---------------------------------------------------- rendering asincrono
@@ -641,24 +852,114 @@ class PdfView(QAbstractScrollArea):
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
+        # La geometria dell'editor di testo fluttuante è fissata alla
+        # posizione dell'apertura: un resize la renderebbe disallineata.
+        self._close_text_editor(commit=True)
         if self.fit_mode != FIT_NONE and self.doc is not None:
             self._apply_fit()
         else:
             self._relayout()
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
+        # Idem per lo scroll: l'editor non segue la pagina, quindi si
+        # committa prima che si disallinei.
+        self._close_text_editor(commit=True)
         self.viewport().update()
 
     def mousePressEvent(self, event) -> None:
-        if (self.tool is not None and self.doc is not None
-                and event.button() == Qt.MouseButton.LeftButton):
-            hit = self._hit_test(event.position().toPoint())
-            if hit is not None:
-                page, point = hit
-                self.editRequested.emit(self.tool, page, point)
+        if event.button() != Qt.MouseButton.LeftButton or self.doc is None:
+            super().mousePressEvent(event)
+            return
+        pos = event.position().toPoint()
+        content_x = pos.x() + self.horizontalScrollBar().value()
+        content_y = pos.y() + self.verticalScrollBar().value()
+
+        # Un'immagine in attesa di conferma: un clic al suo interno la
+        # trascina, uno fuori la conferma prima di valutare il resto.
+        if self._pending_image is not None:
+            pi = self._pending_image
+            if pi["x"] <= content_x <= pi["x"] + pi["w"] and \
+                    pi["y"] <= content_y <= pi["y"] + pi["h"]:
+                self._drag = {
+                    "kind": "pending_image",
+                    "x": pi["x"], "y": pi["y"], "w": pi["w"], "h": pi["h"],
+                    "grab_dx": content_x - pi["x"], "grab_dy": content_y - pi["y"],
+                }
+                self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
                 event.accept()
                 return
+            self._commit_pending_image()
+
+        if self.tool is not None:
+            hit = self._hit_test(pos)
+            if hit is not None:
+                page, point = hit
+                if self.tool == TOOL_ADD_TEXT:
+                    self._open_text_editor(page, point)
+                else:
+                    self.editRequested.emit(self.tool, page, point)
+                event.accept()
+                return
+            super().mousePressEvent(event)
+            return
+
+        # Nessuno strumento attivo: un clic su un'annotazione di testo
+        # esistente la rende trascinabile, senza bisogno di uno strumento
+        # dedicato ("sposta ciò che clicchi", come nella maggior parte
+        # degli editor).
+        hit = self._page_at(content_x, content_y)
+        if hit is not None:
+            page, px, py, _, _ = hit
+            for annot in self.doc.text_annots(page):
+                rx0, ry0, rx1, ry1 = self.doc.to_pixel_rect(
+                    page, annot["rect"], self.zoom, self.rotation)
+                ax0, ay0 = px + min(rx0, rx1), py + min(ry0, ry1)
+                ax1, ay1 = px + max(rx0, rx1), py + max(ry0, ry1)
+                if ax0 <= content_x <= ax1 and ay0 <= content_y <= ay1:
+                    self._drag = {
+                        "kind": "annot", "page": page, "xref": annot["xref"],
+                        "x": ax0, "y": ay0, "w": ax1 - ax0, "h": ay1 - ay0,
+                        "grab_dx": content_x - ax0, "grab_dy": content_y - ay0,
+                    }
+                    self.viewport().setCursor(Qt.CursorShape.SizeAllCursor)
+                    event.accept()
+                    return
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._drag is not None:
+            pos = event.position().toPoint()
+            content_x = pos.x() + self.horizontalScrollBar().value()
+            content_y = pos.y() + self.verticalScrollBar().value()
+            self._drag["x"] = content_x - self._drag["grab_dx"]
+            self._drag["y"] = content_y - self._drag["grab_dy"]
+            self.viewport().update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._drag is not None:
+            drag = self._drag
+            self._drag = None
+            self.viewport().setCursor(
+                Qt.CursorShape.CrossCursor if self.tool else Qt.CursorShape.ArrowCursor)
+            if drag["kind"] == "annot":
+                origin = self._page_origin(drag["page"])
+                if origin is not None and self.doc is not None:
+                    ox, oy = origin
+                    rect_pt = self._pixel_rect_to_page_rect(
+                        drag["page"], drag["x"] - ox, drag["y"] - oy,
+                        drag["x"] - ox + drag["w"], drag["y"] - oy + drag["h"])
+                    self.doc.move_annotation(drag["page"], drag["xref"], rect_pt)
+                    self.refresh_after_edit()
+            elif drag["kind"] == "pending_image" and self._pending_image is not None:
+                self._pending_image["x"] = drag["x"]
+                self._pending_image["y"] = drag["y"]
+                self.viewport().update()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
@@ -677,7 +978,9 @@ class PdfView(QAbstractScrollArea):
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         has_doc = self.doc is not None
 
-        if ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+        if key == Qt.Key.Key_Escape and self._pending_image is not None:
+            self._cancel_pending_image()
+        elif ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
             self.zoom_in()
         elif ctrl and key == Qt.Key.Key_Minus:
             self.zoom_out()

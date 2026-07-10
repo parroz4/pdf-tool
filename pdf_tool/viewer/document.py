@@ -6,6 +6,14 @@ operazioni di sola lettura chiamabili da thread worker; le operazioni di
 editing (sezione sotto) mutano il documento in memoria e vanno chiamate
 dal thread UI — dopo vanno sempre seguite da un refresh della vista
 (cache/layout) perché le pagine coinvolte sono cambiate.
+
+Undo/redo: ogni operazione di editing chiama `_checkpoint()` prima di
+mutare, che salva un'istantanea del documento (bytes in memoria, via
+`Document.tobytes`). Annullare/ripristinare significa riaprire da
+un'istantanea invece di invertire ogni singola operazione: più semplice e
+robusto di un undo "chirurgico" per-operazione (specie per operazioni
+strutturali come inserimento/eliminazione pagine), al costo di un po' di
+memoria — limitata da `MAX_UNDO`.
 """
 
 from __future__ import annotations
@@ -14,6 +22,8 @@ import os
 import threading
 
 import pymupdf
+
+MAX_UNDO = 20
 
 
 class DocumentError(Exception):
@@ -33,6 +43,8 @@ class Document:
     def __init__(self, path: str):
         self._lock = threading.Lock()
         self._closed = False
+        self._undo_stack: list[bytes] = []
+        self._redo_stack: list[bytes] = []
         try:
             self._doc = pymupdf.open(path)
         except Exception as exc:  # file mancante, corrotto, non PDF...
@@ -65,6 +77,42 @@ class Document:
             self.page_count = self._doc.page_count
             self.page_sizes = [(self._doc[i].rect.width, self._doc[i].rect.height)
                                 for i in range(self.page_count)]
+
+    # ------------------------------------------------------------ undo/redo
+
+    def _checkpoint(self) -> None:
+        """Salva un'istantanea PRIMA di una modifica, per poterla annullare."""
+        with self._lock:
+            self._ensure_open()
+            snapshot = self._doc.tobytes(garbage=1, deflate=True)
+        self._undo_stack.append(snapshot)
+        del self._undo_stack[:-MAX_UNDO]
+        self._redo_stack.clear()
+
+    def can_undo(self) -> bool:
+        return bool(self._undo_stack)
+
+    def can_redo(self) -> bool:
+        return bool(self._redo_stack)
+
+    def undo(self) -> None:
+        if self._undo_stack:
+            self._swap_snapshot(self._undo_stack, self._redo_stack)
+
+    def redo(self) -> None:
+        if self._redo_stack:
+            self._swap_snapshot(self._redo_stack, self._undo_stack)
+
+    def _swap_snapshot(self, pop_from: list[bytes], push_to: list[bytes]) -> None:
+        with self._lock:
+            self._ensure_open()
+            current = self._doc.tobytes(garbage=1, deflate=True)
+            snapshot = pop_from.pop()
+            self._doc.close()
+            self._doc = pymupdf.open(stream=snapshot, filetype="pdf")
+        push_to.append(current)
+        self.dirty = True
+        self._refresh_metadata()
 
     # ------------------------------------------------------------------ render
 
@@ -177,6 +225,7 @@ class Document:
 
     def set_widget_value(self, index: int, field_name: str, value) -> bool:
         """Imposta il valore di un campo modulo. Restituisce False se non trovato."""
+        self._checkpoint()
         with self._lock:
             self._ensure_open()
             page = self._doc[index]
@@ -186,44 +235,125 @@ class Document:
                     w.update()
                     self.dirty = True
                     return True
+        self._undo_stack.pop()  # nessuna modifica fatta: annulla il checkpoint
         return False
 
     # --------------------------------------------------------------- editing
 
     def add_freetext(self, index: int, rect_pt: tuple[float, float, float, float],
-                      text: str, fontsize: float = 12, color=(0, 0, 0)) -> None:
-        """Inserisce una casella di testo (annotazione FreeText) sulla pagina."""
+                      text: str, fontsize: float = 12, color=(0, 0, 0)) -> int:
+        """Inserisce una casella di testo (annotazione FreeText). Restituisce l'xref."""
+        self._checkpoint()
         with self._lock:
             self._ensure_open()
             page = self._doc[index]
             annot = page.add_freetext_annot(
                 pymupdf.Rect(*rect_pt), text, fontsize=fontsize, text_color=color)
             annot.update()
+            xref = annot.xref
+        self.dirty = True
+        return xref
+
+    def text_annots(self, index: int) -> list[dict]:
+        """Annotazioni di testo (FreeText) della pagina: xref e rettangolo."""
+        with self._lock:
+            self._ensure_open()
+            page = self._doc[index]
+            result = []
+            annot = page.first_annot
+            while annot is not None:
+                if annot.type[1] == "FreeText":
+                    r = annot.rect
+                    result.append({"xref": annot.xref, "rect": (r.x0, r.y0, r.x1, r.y1)})
+                annot = annot.next
+            return result
+
+    def move_annotation(self, index: int, xref: int,
+                         rect_pt: tuple[float, float, float, float],
+                         checkpoint: bool = True) -> None:
+        """Sposta/ridimensiona un'annotazione esistente (identificata da xref).
+
+        `checkpoint=False` durante un trascinamento continuo: un solo
+        checkpoint all'inizio del gesto, non uno per ogni movimento del
+        mouse (altrimenti la pila di undo si riempirebbe di micro-passi).
+        """
+        if checkpoint:
+            self._checkpoint()
+        with self._lock:
+            self._ensure_open()
+            page = self._doc[index]
+            annot = page.load_annot(xref)
+            annot.set_rect(pymupdf.Rect(*rect_pt))
+            annot.update()
         self.dirty = True
 
     def add_image(self, index: int, rect_pt: tuple[float, float, float, float],
                    image_path: str) -> None:
-        """Inserisce un'immagine sulla pagina (impressa nel contenuto, come un timbro)."""
+        """Inserisce un'immagine sulla pagina (impressa nel contenuto, come un timbro).
+
+        A differenza del testo, il formato PDF non offre un equivalente
+        nativo di "annotazione immagine" spostabile: per questo l'app la
+        tiene in un overlay trascinabile finché non viene confermata (vedi
+        PdfView._pending_image in view.py), e la imprime solo a quel punto.
+        """
+        self._checkpoint()
         with self._lock:
             self._ensure_open()
             page = self._doc[index]
             page.insert_image(pymupdf.Rect(*rect_pt), filename=image_path)
         self.dirty = True
 
-    def insert_pdf(self, other_path: str) -> None:
-        """Accoda in fondo tutte le pagine di un altro PDF."""
+    def insert_pdf(self, other_path: str, at_index: int | None = None) -> None:
+        """Inserisce tutte le pagine di un altro PDF.
+
+        `at_index=None` accoda in fondo; altrimenti le pagine vengono
+        inserite a partire da quella posizione (0-based).
+        """
+        self._checkpoint()
         with self._lock:
             self._ensure_open()
             other = pymupdf.open(other_path)
             try:
-                self._doc.insert_pdf(other)
+                self._doc.insert_pdf(other, start_at=-1 if at_index is None else at_index)
             finally:
                 other.close()
         self.dirty = True
         self._refresh_metadata()
 
+    def insert_pdf_bytes(self, data: bytes, at_index: int | None = None) -> None:
+        """Come `insert_pdf`, ma da un PDF già in memoria (usato per "incolla")."""
+        self._checkpoint()
+        with self._lock:
+            self._ensure_open()
+            other = pymupdf.open(stream=data, filetype="pdf")
+            try:
+                self._doc.insert_pdf(other, start_at=-1 if at_index is None else at_index)
+            finally:
+                other.close()
+        self.dirty = True
+        self._refresh_metadata()
+
+    def extract_pages_bytes(self, indices: list[int]) -> bytes:
+        """Estrae le pagine indicate (nell'ordine dato) come PDF a sé, in memoria.
+
+        Non modifica il documento: usato per "copia" (e come primo passo di
+        "taglia", seguito da `delete_pages`). `select()` ricostruisce il
+        documento sul posto, quindi si lavora su una copia leggera
+        (round-trip in memoria via tobytes) piuttosto che sull'originale.
+        """
+        with self._lock:
+            self._ensure_open()
+            data = self._doc.tobytes(garbage=1, deflate=True)
+        copy_doc = pymupdf.open(stream=data, filetype="pdf")
+        try:
+            copy_doc.select(indices)
+            return copy_doc.tobytes(garbage=1, deflate=True)
+        finally:
+            copy_doc.close()
+
     def move_page(self, from_index: int, to_index: int) -> None:
         """Sposta una pagina: `to_index` è la posizione finale (0-based)."""
+        self._checkpoint()
         with self._lock:
             self._ensure_open()
             self._doc.move_page(from_index, to_index)
@@ -231,11 +361,17 @@ class Document:
         self._refresh_metadata()
 
     def delete_page(self, index: int) -> None:
-        if self.page_count <= 1:
-            raise DocumentError("Non è possibile eliminare l'unica pagina rimasta.")
+        self.delete_pages([index])
+
+    def delete_pages(self, indices: list[int]) -> None:
+        """Elimina più pagine in un colpo solo (un solo checkpoint di undo)."""
+        if self.page_count - len(set(indices)) < 1:
+            raise DocumentError("Non è possibile eliminare tutte le pagine del documento.")
+        self._checkpoint()
         with self._lock:
             self._ensure_open()
-            self._doc.delete_page(index)
+            for i in sorted(set(indices), reverse=True):
+                self._doc.delete_page(i)
         self.dirty = True
         self._refresh_metadata()
 

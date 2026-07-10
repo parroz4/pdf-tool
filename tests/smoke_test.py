@@ -16,8 +16,8 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pymupdf  # noqa: E402
-from PySide6.QtCore import QPoint, QSettings, QTimer  # noqa: E402
-from PySide6.QtGui import QColor, QImage  # noqa: E402
+from PySide6.QtCore import QEvent, QPoint, QPointF, QSettings, Qt, QTimer  # noqa: E402
+from PySide6.QtGui import QColor, QImage, QMouseEvent  # noqa: E402
 from PySide6.QtWidgets import (  # noqa: E402
     QApplication, QFileDialog, QInputDialog, QMessageBox,
 )
@@ -41,7 +41,9 @@ QMessageBox.critical = staticmethod(
 
 from pdf_tool.app import MainWindow  # noqa: E402
 from pdf_tool.viewer.render import make_key  # noqa: E402
-from pdf_tool.viewer.view import MODE_BOOK, MODE_CONTINUOUS, MODE_SINGLE  # noqa: E402
+from pdf_tool.viewer.view import (  # noqa: E402
+    MODE_BOOK, MODE_CONTINUOUS, MODE_SINGLE, TOOL_ADD_IMAGE,
+)
 
 PDF = os.path.join(ROOT, "examples", "test.pdf")
 
@@ -190,6 +192,24 @@ def main():
             else:
                 print("OK: editing - testo aggiunto (documento segnato come modificato)")
 
+            # Undo/redo: annullare il testo appena aggiunto deve farlo sparire
+            if not edit_view.doc.can_undo():
+                failures.append("editing: can_undo() False dopo add_freetext")
+            annots_before_undo = len(edit_view.doc.text_annots(0))
+            edit_window.undo()
+            annots_after_undo = len(edit_view.doc.text_annots(0))
+            if annots_after_undo != annots_before_undo - 1:
+                failures.append(
+                    f"editing: undo non ha rimosso l'annotazione ({annots_before_undo} -> "
+                    f"{annots_after_undo})")
+            else:
+                print("OK: editing - undo (rimuove il testo appena aggiunto)")
+            edit_window.redo()
+            if len(edit_view.doc.text_annots(0)) != annots_before_undo:
+                failures.append("editing: redo non ha ripristinato l'annotazione")
+            else:
+                print("OK: editing - redo (ripristina il testo)")
+
             img_path = os.path.join(tempfile.mkdtemp(prefix="pdftool-test-img-"), "logo.png")
             img = QImage(30, 30, QImage.Format.Format_RGB32)
             img.fill(QColor("blue"))
@@ -286,19 +306,109 @@ def main():
         # app.quit() più sotto termina comunque il loop senza invocare
         # closeEvent sulle finestre rimaste aperte.
 
-        # _add_image_at: anche qui il file dialog è sostituito con uno stub
+        # _add_image_at: anche qui il file dialog è sostituito con uno stub.
+        # L'immagine resta "in sospeso" (trascinabile) finché non si
+        # conferma: il documento non deve risultare modificato subito.
         img2_window = MainWindow(edit_src)
         img2_window.show()
+        # Attiva davvero lo strumento (passa da _toggle_tool, come farebbe
+        # un clic sul pulsante): altrimenti lo spegnimento più sotto non
+        # genera un cambio di stato reale e non scatta la conferma.
+        img2_window._tool_actions[TOOL_ADD_IMAGE].setChecked(True)
         original_get_open = QFileDialog.getOpenFileName
         QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (img_path, ""))
         try:
             img2_window._add_image_at(0, (100, 100))
         finally:
             QFileDialog.getOpenFileName = original_get_open
-        if img2_window.view.doc.dirty:
-            print("OK: editing - _add_image_at (dialog stub)")
+        if img2_window.view.doc.dirty or img2_window.view._pending_image is None:
+            failures.append("editing: _add_image_at doveva lasciare un'immagine in sospeso")
         else:
-            failures.append("editing: _add_image_at non ha modificato il documento")
+            print("OK: editing - _add_image_at (immagine in sospeso, non ancora impressa)")
+
+        # Trascinamento dell'immagine in sospeso: simula press/move/release
+        pi = img2_window.view._pending_image
+        x0, y0 = pi["x"], pi["y"]
+        press = QMouseEvent(
+            QEvent.Type.MouseButtonPress,
+            QPointF(x0 + pi["w"] / 2, y0 + pi["h"] / 2),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        img2_window.view.mousePressEvent(press)
+        move = QMouseEvent(
+            QEvent.Type.MouseMove,
+            QPointF(x0 + pi["w"] / 2 + 30, y0 + pi["h"] / 2 + 15),
+            Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier)
+        img2_window.view.mouseMoveEvent(move)
+        release = QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            QPointF(x0 + pi["w"] / 2 + 30, y0 + pi["h"] / 2 + 15),
+            Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier)
+        img2_window.view.mouseReleaseEvent(release)
+        pi_after_drag = img2_window.view._pending_image
+        if pi_after_drag is None or (pi_after_drag["x"], pi_after_drag["y"]) == (x0, y0):
+            failures.append("editing: il trascinamento dell'immagine in sospeso non ha spostato nulla")
+        else:
+            print(f"OK: editing - immagine in sospeso trascinata "
+                  f"({x0:.0f},{y0:.0f}) -> ({pi_after_drag['x']:.0f},{pi_after_drag['y']:.0f})")
+
+        # Conferma: cambiare strumento imprime l'immagine sulla pagina
+        img2_window._tool_actions[TOOL_ADD_IMAGE].setChecked(False)
+        if img2_window.view._pending_image is not None or not img2_window.view.doc.dirty:
+            failures.append("editing: il cambio di strumento non ha confermato l'immagine in sospeso")
+        else:
+            print("OK: editing - immagine impressa alla conferma (cambio strumento)")
+
+        # Editor di testo inline: apertura, digitazione, chiusura per
+        # perdita del focus (commit) -> deve comparire una nuova annotazione
+        annots_before = len(img2_window.view.doc.text_annots(0))
+        img2_window.view._open_text_editor(0, (60, 400))
+        editor = img2_window.view._text_editor
+        if editor is None:
+            failures.append("editing: _open_text_editor non ha creato l'editor inline")
+        else:
+            editor.setPlainText("Scritto direttamente sulla pagina")
+            img2_window.view._close_text_editor(commit=True)
+            annots_after = len(img2_window.view.doc.text_annots(0))
+            if annots_after != annots_before + 1:
+                failures.append(
+                    f"editing: editor inline, annotazioni {annots_before} -> {annots_after}")
+            else:
+                print("OK: editing - editor di testo inline (scrittura diretta sulla pagina)")
+
+            # Spostamento dell'annotazione appena creata (nessuno strumento
+            # attivo: si trascina direttamente, come da richiesta)
+            annot = img2_window.view.doc.text_annots(0)[-1]
+            rx0, ry0, rx1, ry1 = img2_window.view.doc.to_pixel_rect(
+                0, annot["rect"], img2_window.view.zoom, img2_window.view.rotation)
+            origin = img2_window.view._page_origin(0)
+            if origin is not None:
+                ox, oy = origin
+                cx, cy = ox + (rx0 + rx1) / 2, oy + (ry0 + ry1) / 2
+                press2 = QMouseEvent(
+                    QEvent.Type.MouseButtonPress, QPointF(cx, cy),
+                    Qt.MouseButton.LeftButton, Qt.MouseButton.LeftButton,
+                    Qt.KeyboardModifier.NoModifier)
+                img2_window.view.mousePressEvent(press2)
+                if img2_window.view._drag is None:
+                    failures.append("editing: clic su un'annotazione di testo non avvia il trascinamento")
+                else:
+                    move2 = QMouseEvent(
+                        QEvent.Type.MouseMove, QPointF(cx + 40, cy + 20),
+                        Qt.MouseButton.NoButton, Qt.MouseButton.LeftButton,
+                        Qt.KeyboardModifier.NoModifier)
+                    img2_window.view.mouseMoveEvent(move2)
+                    release2 = QMouseEvent(
+                        QEvent.Type.MouseButtonRelease, QPointF(cx + 40, cy + 20),
+                        Qt.MouseButton.LeftButton, Qt.MouseButton.NoButton,
+                        Qt.KeyboardModifier.NoModifier)
+                    img2_window.view.mouseReleaseEvent(release2)
+                    moved_rect = img2_window.view.doc.text_annots(0)[-1]["rect"]
+                    if moved_rect == annot["rect"]:
+                        failures.append("editing: il trascinamento non ha spostato l'annotazione")
+                    else:
+                        print(f"OK: editing - annotazione di testo spostata "
+                              f"({annot['rect']} -> {moved_rect})")
+
         img2_window.save_document()
         img2_window.close()
 

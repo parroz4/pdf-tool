@@ -34,8 +34,6 @@ from .viewer.view import (
 APP_NAME = "PDF Tool"
 MAX_RECENT_FILES = 10
 MAX_REMEMBERED_DOCS = 50
-ADD_TEXT_SIZE_PT = (240, 50)   # larghezza, altezza di default per il testo inserito
-ADD_IMAGE_WIDTH_PT = 140       # larghezza di default per le immagini inserite
 CHECKBOX_OFF_VALUES = ("off", "", "0", "false", "none")
 # _MEIPASS: radice dei dati bundled da PyInstaller (onedir e onefile);
 # in sviluppo è semplicemente la root del progetto.
@@ -106,6 +104,7 @@ class MainWindow(QMainWindow):
         self.view.pageChanged.connect(
             lambda cur, tot: self.thumb_panel.set_current_page(cur - 1))
         self.view.editRequested.connect(self._on_edit_requested)
+        self.view.documentChanged.connect(self._update_title)
 
         # Statusbar: modalità, pagina e zoom
         self.mode_label = QLabel(MODE_NAMES[self.view.mode] + "  ")
@@ -223,12 +222,21 @@ class MainWindow(QMainWindow):
             QKeySequence.StandardKey.FindPrevious)
 
         m_edit = bar.addMenu("&Modifica")
+        self._undo_action = act(m_edit, "&Annulla", self.undo, QKeySequence.StandardKey.Undo)
+        self._redo_action = act(m_edit, "&Ripristina", self.redo, QKeySequence.StandardKey.Redo)
+        self._undo_action.setEnabled(False)
+        self._redo_action.setEnabled(False)
+        m_edit.addSeparator()
         self._tool_actions = {}
-        for tool, label, seq in (
-                (TOOL_FORM, "&Compila modulo (clic su un campo)", "Ctrl+Shift+F"),
-                (TOOL_ADD_TEXT, "Aggiungi &testo (clic sulla pagina)", "Ctrl+Shift+T"),
-                (TOOL_ADD_IMAGE, "Aggiungi &immagine (clic sulla pagina)", "Ctrl+Shift+I")):
+        for tool, label, short_label, seq in (
+                (TOOL_FORM, "&Compila modulo (clic su un campo)", "Compila modulo",
+                 "Ctrl+Shift+F"),
+                (TOOL_ADD_TEXT, "Aggiungi &testo (clic sulla pagina)", "Aggiungi testo",
+                 "Ctrl+Shift+T"),
+                (TOOL_ADD_IMAGE, "Aggiungi &immagine (clic sulla pagina)", "Aggiungi immagine",
+                 "Ctrl+Shift+I")):
             action = QAction(label, self)
+            action.setIconText(short_label)  # etichetta breve per la toolbar
             action.setCheckable(True)
             action.setShortcut(QKeySequence(seq))
             action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
@@ -237,12 +245,34 @@ class MainWindow(QMainWindow):
             self._tool_actions[tool] = action
 
         m_doc = bar.addMenu("&Documento")
-        act(m_doc, "&Unisci PDF…", self.merge_pdf_dialog)
+        self._merge_action = act(m_doc, "&Unisci PDF…", self.merge_pdf_dialog)
         act(m_doc, "Elimina pagina &corrente", self._delete_current_page)
         m_doc.addSeparator()
-        act(m_doc, "&Salva", self.save_document, QKeySequence.StandardKey.Save)
+        self._save_action = act(
+            m_doc, "&Salva", self.save_document, QKeySequence.StandardKey.Save)
         act(m_doc, "Salva con &nome…", self.save_document_as,
             QKeySequence.StandardKey.SaveAs)
+
+        self._setup_toolbar()
+
+    def _setup_toolbar(self):
+        # Riusa le stesse QAction del menu: stato (spuntato/abilitato) e
+        # scorciatoie restano sincronizzati automaticamente in entrambi i
+        # posti. Solo le azioni di editing, non l'intera superficie del
+        # menu: la vista resta leggera, qui serve solo dare visibilità
+        # immediata agli strumenti più usati.
+        toolbar = self.addToolBar("Modifica")
+        toolbar.setMovable(False)
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        toolbar.addAction(self._undo_action)
+        toolbar.addAction(self._redo_action)
+        toolbar.addSeparator()
+        toolbar.addAction(self._tool_actions[TOOL_FORM])
+        toolbar.addAction(self._tool_actions[TOOL_ADD_TEXT])
+        toolbar.addAction(self._tool_actions[TOOL_ADD_IMAGE])
+        toolbar.addSeparator()
+        toolbar.addAction(self._merge_action)
+        toolbar.addAction(self._save_action)
 
     def _goto_last_page(self):
         if self.view.doc is not None:
@@ -294,12 +324,25 @@ class MainWindow(QMainWindow):
         doc = self.view.doc
         if doc is None:
             self.setWindowTitle(APP_NAME)
-            return
-        dirty = "• " if doc.dirty else ""
-        self.setWindowTitle(f"{dirty}{os.path.basename(doc.path)} — {APP_NAME}")
+        else:
+            dirty = "• " if doc.dirty else ""
+            self.setWindowTitle(f"{dirty}{os.path.basename(doc.path)} — {APP_NAME}")
+        self._undo_action.setEnabled(doc is not None and doc.can_undo())
+        self._redo_action.setEnabled(doc is not None and doc.can_redo())
+
+    def undo(self) -> None:
+        if self.view.doc is not None and self.view.doc.can_undo():
+            self.view.doc.undo()
+            self._after_structural_edit()
+
+    def redo(self) -> None:
+        if self.view.doc is not None and self.view.doc.can_redo():
+            self.view.doc.redo()
+            self._after_structural_edit()
 
     def _confirm_discard_changes(self) -> bool:
         """Se ci sono modifiche non salvate, chiede conferma. False = annulla."""
+        self.view.commit_pending_edits()
         doc = self.view.doc
         if doc is None or not doc.dirty:
             return True
@@ -345,10 +388,10 @@ class MainWindow(QMainWindow):
         self.view.set_tool(None)
 
     def _on_edit_requested(self, tool: str, page: int, point: tuple) -> None:
+        # TOOL_ADD_TEXT non passa di qui: PdfView apre l'editor inline
+        # direttamente (si scrive sulla pagina, niente popup).
         if tool == TOOL_FORM:
             self._fill_form_field_at(page, point)
-        elif tool == TOOL_ADD_TEXT:
-            self._add_text_at(page, point)
         elif tool == TOOL_ADD_IMAGE:
             self._add_image_at(page, point)
 
@@ -373,41 +416,19 @@ class MainWindow(QMainWindow):
         self.view.refresh_after_edit()
         self._update_title()
 
-    def _clamped_rect(self, page: int, point: tuple, w_pt: float, h_pt: float):
-        doc = self.view.doc
-        page_w, page_h = doc.page_sizes[page]
-        x0 = max(0.0, min(point[0], max(0.0, page_w - w_pt)))
-        y0 = max(0.0, min(point[1], max(0.0, page_h - h_pt)))
-        return (x0, y0, x0 + w_pt, y0 + h_pt)
-
-    def _add_text_at(self, page: int, point: tuple) -> None:
-        text, ok = QInputDialog.getMultiLineText(self, "Aggiungi testo", "Testo:", "")
-        if not ok or not text.strip():
-            return
-        rect = self._clamped_rect(page, point, *ADD_TEXT_SIZE_PT)
-        self.view.doc.add_freetext(page, rect, text)
-        self.view.refresh_after_edit()
-        self._update_title()
-
     def _add_image_at(self, page: int, point: tuple) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Aggiungi immagine", "",
             "Immagini (*.png *.jpg *.jpeg *.bmp *.gif)")
         if not path:
             return
-        img = QImage(path)
-        if img.isNull():
+        if QImage(path).isNull():
             QMessageBox.warning(self, APP_NAME, "Impossibile leggere l'immagine scelta.")
             return
-        height_pt = ADD_IMAGE_WIDTH_PT * img.height() / img.width()
-        rect = self._clamped_rect(page, point, ADD_IMAGE_WIDTH_PT, height_pt)
-        try:
-            self.view.doc.add_image(page, rect, path)
-        except Exception as exc:
-            QMessageBox.critical(self, APP_NAME, f"Impossibile inserire l'immagine:\n{exc}")
-            return
-        self.view.refresh_after_edit()
-        self._update_title()
+        # Non impressa subito: resta trascinabile finché non si conferma
+        # (clic altrove, cambio strumento, salvataggio) — vedi
+        # PdfView.start_image_placement/_commit_pending_image.
+        self.view.start_image_placement(page, point, path)
 
     # -------------------------------------------------------- gestione pagine
 
@@ -464,6 +485,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("PDF unito in fondo al documento.", 4000)
 
     def save_document(self) -> None:
+        self.view.commit_pending_edits()
         doc = self.view.doc
         if doc is None:
             return
@@ -476,6 +498,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Documento salvato.", 3000)
 
     def save_document_as(self) -> None:
+        self.view.commit_pending_edits()
         doc = self.view.doc
         if doc is None:
             return

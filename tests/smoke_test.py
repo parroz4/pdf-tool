@@ -18,6 +18,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from pdf_tool.app import MainWindow  # noqa: E402
 from pdf_tool.viewer.render import make_key  # noqa: E402
+from pdf_tool.viewer.view import MODE_BOOK, MODE_CONTINUOUS, MODE_SINGLE  # noqa: E402
 
 PDF = os.path.join(ROOT, "examples", "test.pdf")
 
@@ -65,6 +66,35 @@ def main():
         view.zoom_in()
         view.viewport().repaint()
         print(f"OK: zoom in (zoom {view.zoom:.2f})")
+
+        # Modalità di visualizzazione: la pagina corrente si deve conservare
+        view.goto_page(2)
+        before = view.current_page()
+        for mode, name in ((MODE_SINGLE, "pagina singola"),
+                           (MODE_BOOK, "libro"),
+                           (MODE_CONTINUOUS, "scorrimento")):
+            view.set_mode(mode)
+            view.viewport().repaint()
+            after = view.current_page()
+            # In modalità libro la pagina 2 può stare in una coppia: basta
+            # che la riga mostrata contenga la pagina di partenza.
+            row_pages = view._rows[view._row_of[before]]
+            if after != before and before not in row_pages:
+                failures.append(
+                    f"cambio modalità '{name}': pagina {before} -> {after}")
+            else:
+                print(f"OK: modalità '{name}' (pagina corrente {after + 1})")
+
+        # Flip di pagina in modalità singola
+        view.set_mode(MODE_SINGLE)
+        view.goto_page(0)
+        view._flip(1)
+        view.viewport().repaint()
+        if view.current_page() != 1:
+            failures.append(f"flip pagina: atteso 2, corrente {view.current_page() + 1}")
+        else:
+            print("OK: flip alla pagina successiva in modalità singola")
+        view.set_mode(MODE_CONTINUOUS)
 
         app.quit()
 

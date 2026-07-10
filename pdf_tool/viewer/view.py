@@ -1,9 +1,14 @@
-"""Widget di visualizzazione PDF a scroll continuo.
+"""Widget di visualizzazione PDF con più modalità di visualizzazione.
 
 Basato su QAbstractScrollArea: nessun widget per pagina, si dipinge
 direttamente sul viewport solo ciò che è visibile. Le pagine vengono
 renderizzate in modo lazy da un QThreadPool (visibili + prefetch delle
 adiacenti) e tenute in una cache LRU.
+
+Il layout è organizzato in "righe" di pagine:
+- Scorrimento (default): una pagina per riga, scroll continuo verticale;
+- Pagina singola: una pagina per riga, paginato (una riga alla volta);
+- Libro: copertina da sola, poi coppie affiancate, paginato.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ from .render import LRUImageCache, RenderSignals, RenderTask, make_key
 
 MARGIN = 12          # px attorno al documento
 GAP = 12             # px tra una pagina e l'altra
-PREFETCH = 2         # pagine pre-renderizzate sopra/sotto quelle visibili
+PREFETCH = 2         # righe pre-renderizzate prima/dopo quelle visibili
 MIN_ZOOM = 0.1
 MAX_ZOOM = 8.0
 ZOOM_STEP = 1.25
@@ -33,12 +38,23 @@ FIT_NONE = 0
 FIT_WIDTH = 1
 FIT_PAGE = 2
 
+MODE_SINGLE = 0      # una pagina alla volta (paginato)
+MODE_CONTINUOUS = 1  # scorrimento continuo verticale (default)
+MODE_BOOK = 2        # copertina sola, poi coppie affiancate (paginato)
+
+MODE_NAMES = {
+    MODE_SINGLE: "Pagina singola",
+    MODE_CONTINUOUS: "Scorrimento",
+    MODE_BOOK: "Libro",
+}
+
 
 class PdfView(QAbstractScrollArea):
-    """Vista a scroll continuo verticale con zoom e ricerca evidenziata."""
+    """Vista PDF con zoom, ricerca evidenziata e tre modalità di layout."""
 
     pageChanged = Signal(int, int)      # pagina corrente (1-based), totale
     zoomChanged = Signal(float)         # fattore di zoom corrente
+    modeChanged = Signal(str)           # nome della modalità corrente
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -48,11 +64,21 @@ class PdfView(QAbstractScrollArea):
         self.doc: Document | None = None
         self.zoom = 1.0
         self.fit_mode = FIT_WIDTH
+        self.mode = MODE_CONTINUOUS
 
-        # Layout verticale (coordinate "contenuto" alla scala corrente)
-        self._offsets: list[int] = []   # y del bordo alto di ogni pagina
-        self._pw: list[int] = []        # larghezze pagina in px
-        self._ph: list[int] = []        # altezze pagina in px
+        # Raggruppamento pagine -> righe (dipende dalla modalità)
+        self._rows: list[list[int]] = []
+        self._row_of: dict[int, int] = {}
+        self._cur_row = 0               # riga mostrata nelle modalità paginate
+
+        # Layout delle righe effettivamente presenti (coordinate "contenuto"
+        # alla scala corrente). Nelle modalità paginate c'è una sola riga.
+        self._laid: list[int] = []      # indici globali delle righe nel layout
+        self._row_y: list[int] = []     # y del bordo alto di ogni riga
+        self._row_w: list[int] = []
+        self._row_h: list[int] = []
+        # pagina -> (indice riga nel layout, x nella riga, y, w, h)
+        self._page_geo: dict[int, tuple[int, int, int, int, int]] = {}
         self._content_w = 0
         self._content_h = 0
 
@@ -88,6 +114,8 @@ class PdfView(QAbstractScrollArea):
         self._pending.clear()
         self.clear_search()
         self._last_emitted_page = -1
+        self._build_rows()
+        self._cur_row = 0
         if self.fit_mode != FIT_NONE:
             self._apply_fit()
         self._relayout()
@@ -97,24 +125,93 @@ class PdfView(QAbstractScrollArea):
         self._emit_page_changed()
         self.zoomChanged.emit(self.zoom)
 
+    # ------------------------------------------------------------- modalità
+
+    def _paged(self) -> bool:
+        return self.mode != MODE_CONTINUOUS
+
+    def _build_rows(self) -> None:
+        n = self.doc.page_count if self.doc else 0
+        if self.mode == MODE_BOOK and n > 0:
+            rows = [[0]]                # copertina da sola, come in un libro
+            i = 1
+            while i < n:
+                rows.append([i] if i + 1 >= n else [i, i + 1])
+                i += 2
+        else:
+            rows = [[i] for i in range(n)]
+        self._rows = rows
+        self._row_of = {p: r for r, pages in enumerate(rows) for p in pages}
+
+    def set_mode(self, mode: int) -> None:
+        if mode == self.mode:
+            return
+        cur = self.current_page()
+        self.mode = mode
+        self.modeChanged.emit(MODE_NAMES[mode])
+        if self.doc is None:
+            return
+        self._build_rows()
+        if self._paged():
+            self._show_row(self._row_of.get(cur, 0))
+        else:
+            if self.fit_mode != FIT_NONE:
+                self._apply_fit()
+            else:
+                self._relayout()
+            self.goto_page(cur)
+        self.viewport().update()
+        self._emit_page_changed()
+
+    def _show_row(self, row: int, at_bottom: bool = False) -> None:
+        """Mostra una riga nelle modalità paginate (relayout + scroll)."""
+        self._cur_row = max(0, min(row, len(self._rows) - 1))
+        if self.fit_mode != FIT_NONE:
+            self._apply_fit()
+        else:
+            self._relayout()
+        vbar = self.verticalScrollBar()
+        vbar.setValue(vbar.maximum() if at_bottom else 0)
+        self.viewport().update()
+        self._emit_page_changed()
+
+    def _flip(self, direction: int) -> None:
+        """Riga successiva (+1) o precedente (-1) nelle modalità paginate."""
+        row = self._cur_row + direction
+        if 0 <= row < len(self._rows):
+            self._show_row(row, at_bottom=(direction < 0))
+
     # --------------------------------------------------------------- layout
 
     def _relayout(self) -> None:
-        """Ricalcola offset e range delle scrollbar alla scala corrente."""
-        self._offsets, self._pw, self._ph = [], [], []
+        """Ricalcola geometria delle righe e range delle scrollbar."""
+        self._laid, self._row_y, self._row_w, self._row_h = [], [], [], []
+        self._page_geo = {}
         if self.doc is None:
             self._content_w = self._content_h = 0
         else:
+            laid = ([self._cur_row] if self._paged()
+                    else list(range(len(self._rows))))
             y = MARGIN
             max_w = 0
-            for (w_pt, h_pt) in self.doc.page_sizes:
-                w = max(1, round(w_pt * self.zoom))
-                h = max(1, round(h_pt * self.zoom))
-                self._offsets.append(y)
-                self._pw.append(w)
-                self._ph.append(h)
-                y += h + GAP
-                max_w = max(max_w, w)
+            for li, r in enumerate(laid):
+                pages = self._rows[r]
+                widths = [max(1, round(self.doc.page_sizes[p][0] * self.zoom))
+                          for p in pages]
+                heights = [max(1, round(self.doc.page_sizes[p][1] * self.zoom))
+                           for p in pages]
+                row_w = sum(widths) + GAP * (len(pages) - 1)
+                row_h = max(heights)
+                self._laid.append(r)
+                self._row_y.append(y)
+                self._row_w.append(row_w)
+                self._row_h.append(row_h)
+                x = 0
+                for p, w, h in zip(pages, widths, heights):
+                    self._page_geo[p] = (li, x, y, w, h)
+                    x += w + GAP
+                y += row_h + GAP
+                max_w = max(max_w, row_w)
             self._content_h = y - GAP + MARGIN
             self._content_w = max_w + 2 * MARGIN
 
@@ -127,32 +224,42 @@ class PdfView(QAbstractScrollArea):
         hbar.setPageStep(vp.width())
         hbar.setSingleStep(48)
 
-    def _page_x(self, index: int) -> int:
-        """Ascissa del bordo sinistro della pagina (coordinate contenuto)."""
+    def _row_x(self, li: int) -> int:
+        """Ascissa del bordo sinistro della riga (coordinate contenuto)."""
         area_w = max(self._content_w, self.viewport().width())
-        return (area_w - self._pw[index]) // 2
+        return (area_w - self._row_w[li]) // 2
 
-    def _visible_range(self) -> tuple[int, int]:
-        """(prima, ultima) pagina almeno parzialmente visibile."""
-        if not self._offsets:
+    def _visible_rows(self) -> tuple[int, int]:
+        """(prima, ultima) riga del layout almeno parzialmente visibile."""
+        if not self._row_y:
             return (0, -1)
         top = self.verticalScrollBar().value()
         bottom = top + self.viewport().height()
-        first = max(0, bisect_right(self._offsets, top) - 1)
-        if self._offsets[first] + self._ph[first] <= top and first + 1 < len(self._offsets):
+        first = max(0, bisect_right(self._row_y, top) - 1)
+        if self._row_y[first] + self._row_h[first] <= top and first + 1 < len(self._row_y):
             first += 1
         last = first
-        while last + 1 < len(self._offsets) and self._offsets[last + 1] < bottom:
+        while last + 1 < len(self._row_y) and self._row_y[last + 1] < bottom:
             last += 1
         return (first, last)
 
+    def _visible_pages(self) -> list[int]:
+        first, last = self._visible_rows()
+        pages: list[int] = []
+        for li in range(first, last + 1):
+            pages.extend(self._rows[self._laid[li]])
+        return pages
+
     def current_page(self) -> int:
         """Indice (0-based) della pagina 'corrente' per la statusbar."""
-        if not self._offsets:
+        if self.doc is None or not self._laid:
             return 0
+        if self._paged():
+            return self._rows[self._cur_row][0]
         probe = self.verticalScrollBar().value() + self.viewport().height() // 4
-        i = max(0, bisect_right(self._offsets, probe) - 1)
-        return min(i, len(self._offsets) - 1)
+        li = max(0, bisect_right(self._row_y, probe) - 1)
+        li = min(li, len(self._laid) - 1)
+        return self._rows[self._laid[li]][0]
 
     # ----------------------------------------------------------------- zoom
 
@@ -191,15 +298,21 @@ class PdfView(QAbstractScrollArea):
         if self.doc is None:
             self.fit_mode = mode
             return
-        max_w = max(w for w, _ in self.doc.page_sizes)
-        max_h = max(h for _, h in self.doc.page_sizes)
         vp = self.viewport()
         avail_w = max(50, vp.width() - 2 * MARGIN)
         avail_h = max(50, vp.height() - 2 * MARGIN)
-        if mode == FIT_PAGE:
-            zoom = min(avail_w / max_w, avail_h / max_h)
-        else:
-            zoom = avail_w / max_w
+        # Il fit si calcola sulle righe (in modalità libro una riga è larga
+        # due pagine); nelle modalità paginate conta solo la riga corrente.
+        rows = [self._rows[self._cur_row]] if self._paged() else self._rows
+        zoom = MAX_ZOOM
+        for pages in rows:
+            w_pt = sum(self.doc.page_sizes[p][0] for p in pages)
+            h_pt = max(self.doc.page_sizes[p][1] for p in pages)
+            gaps = GAP * (len(pages) - 1)
+            z = (avail_w - gaps) / w_pt
+            if mode == FIT_PAGE:
+                z = min(z, avail_h / h_pt)
+            zoom = min(zoom, z)
         self.set_zoom(zoom, fit_mode=mode)
 
     def _anchor_before(self, vy: int):
@@ -209,34 +322,41 @@ class PdfView(QAbstractScrollArea):
         lo zoom/fit si resta semplicemente in cima (evita derive quando il
         layout precedente era calcolato su un viewport non ancora definitivo).
         """
-        if not self._offsets or self.verticalScrollBar().value() == 0:
+        if not self._row_y or self.verticalScrollBar().value() == 0:
             return None
         y = self.verticalScrollBar().value() + vy
-        i = max(0, bisect_right(self._offsets, y) - 1)
-        offset_pt = (y - self._offsets[i]) / self.zoom
-        # Clamp dentro la pagina: un anchor fuori scala non deve mai
+        li = max(0, min(bisect_right(self._row_y, y) - 1, len(self._laid) - 1))
+        offset_pt = (y - self._row_y[li]) / self.zoom
+        # Clamp dentro la riga: un anchor fuori scala non deve mai
         # proiettare lo scroll lontano dal punto reale.
-        offset_pt = max(0.0, min(offset_pt, self.doc.page_sizes[i][1]))
-        return (i, offset_pt)
+        row_h_pt = max(self.doc.page_sizes[p][1] for p in self._rows[self._laid[li]])
+        offset_pt = max(0.0, min(offset_pt, row_h_pt))
+        return (li, offset_pt)
 
     def _anchor_restore(self, anchor, vy: int) -> None:
-        if not self._offsets:
+        if not self._row_y:
             return
         if anchor is None:
             self.verticalScrollBar().setValue(0)
             return
-        i, offset_pt = anchor
-        i = min(i, len(self._offsets) - 1)
-        y = self._offsets[i] + offset_pt * self.zoom - vy
+        li, offset_pt = anchor
+        li = min(li, len(self._row_y) - 1)
+        y = self._row_y[li] + offset_pt * self.zoom - vy
         self.verticalScrollBar().setValue(round(y))
 
     # ----------------------------------------------------------- navigazione
 
     def goto_page(self, index: int) -> None:
-        if not self._offsets:
+        if self.doc is None or not self._rows:
             return
-        index = max(0, min(index, len(self._offsets) - 1))
-        self.verticalScrollBar().setValue(self._offsets[index] - MARGIN)
+        index = max(0, min(index, self.doc.page_count - 1))
+        row = self._row_of[index]
+        if self._paged():
+            self._show_row(row)
+        else:
+            # In modalità continua il layout contiene tutte le righe,
+            # quindi indice globale e indice di layout coincidono.
+            self.verticalScrollBar().setValue(self._row_y[row] - MARGIN)
 
     # -------------------------------------------------------------- ricerca
 
@@ -273,8 +393,13 @@ class PdfView(QAbstractScrollArea):
         else:
             self._current_hit = (self._current_hit + direction) % len(self._hit_list)
         page, rect = self._hit_list[self._current_hit]
-        target = self._offsets[page] + rect.y0 * self.zoom - self.viewport().height() // 3
-        self.verticalScrollBar().setValue(round(target))
+        if self._paged() and self._row_of[page] != self._cur_row:
+            self._show_row(self._row_of[page])
+        geo = self._page_geo.get(page)
+        if geo is not None:
+            _, _, y, _, _ = geo
+            target = y + rect.y0 * self.zoom - self.viewport().height() // 3
+            self.verticalScrollBar().setValue(round(target))
         self.viewport().update()
         return self._current_hit
 
@@ -286,69 +411,88 @@ class PdfView(QAbstractScrollArea):
         if self.doc is None:
             painter.setPen(QColor(200, 200, 200))
             painter.drawText(self.viewport().rect(), Qt.AlignmentFlag.AlignCenter,
-                             "Nessun documento aperto\nCtrl+O per aprire un PDF")
+                             "Nessun documento aperto\nCtrl+O per aprire un PDF"
+                             "\n(o trascina qui un file PDF)")
             painter.end()
             return
 
         xoff = self.horizontalScrollBar().value()
         yoff = self.verticalScrollBar().value()
-        first, last = self._visible_range()
-        self._schedule_renders(first, last)
+        first, last = self._visible_rows()
+        self._schedule_renders()
 
-        for i in range(first, last + 1):
-            x = self._page_x(i) - xoff
-            y = self._offsets[i] - yoff
-            w, h = self._pw[i], self._ph[i]
+        current = (self._hit_list[self._current_hit]
+                   if 0 <= self._current_hit < len(self._hit_list) else None)
+        for li in range(first, last + 1):
+            row_x = self._row_x(li)
+            for p in self._rows[self._laid[li]]:
+                _, x_rel, gy, w, h = self._page_geo[p]
+                x = row_x + x_rel - xoff
+                y = gy - yoff
 
-            key = make_key(i, self.zoom)
-            image = self._cache.get(key)
-            if image is not None:
-                painter.drawImage(x, y, image)
-            else:
-                # Placeholder: bianco, oppure il render precedente riscalato
-                painter.fillRect(x, y, w, h, Qt.GlobalColor.white)
-                fallback = self._fallback.get(i)
-                if fallback is not None:
-                    painter.drawImage(QRectF(x, y, w, h), fallback[1])
+                key = make_key(p, self.zoom)
+                image = self._cache.get(key)
+                if image is not None:
+                    painter.drawImage(x, y, image)
+                else:
+                    # Placeholder: bianco, oppure il render precedente riscalato
+                    painter.fillRect(x, y, w, h, Qt.GlobalColor.white)
+                    fallback = self._fallback.get(p)
+                    if fallback is not None:
+                        painter.drawImage(QRectF(x, y, w, h), fallback[1])
 
-            painter.setPen(QPen(PAGE_BORDER))
-            painter.drawRect(x, y, w - 1, h - 1)
+                painter.setPen(QPen(PAGE_BORDER))
+                painter.drawRect(x, y, w - 1, h - 1)
 
-            # Evidenziazione risultati di ricerca
-            rects = self._hits.get(i)
-            if rects:
-                current = (self._hit_list[self._current_hit]
-                           if 0 <= self._current_hit < len(self._hit_list) else None)
-                for rect in rects:
-                    color = (HIGHLIGHT_CURRENT
-                             if current is not None and current[0] == i and current[1] is rect
-                             else HIGHLIGHT)
-                    painter.fillRect(
-                        QRectF(x + rect.x0 * self.zoom, y + rect.y0 * self.zoom,
-                               (rect.x1 - rect.x0) * self.zoom,
-                               (rect.y1 - rect.y0) * self.zoom),
-                        color)
+                # Evidenziazione risultati di ricerca
+                rects = self._hits.get(p)
+                if rects:
+                    for rect in rects:
+                        color = (HIGHLIGHT_CURRENT
+                                 if current is not None and current[0] == p
+                                 and current[1] is rect
+                                 else HIGHLIGHT)
+                        painter.fillRect(
+                            QRectF(x + rect.x0 * self.zoom, y + rect.y0 * self.zoom,
+                                   (rect.x1 - rect.x0) * self.zoom,
+                                   (rect.y1 - rect.y0) * self.zoom),
+                            color)
         painter.end()
 
     # ---------------------------------------------------- rendering asincrono
 
-    def _schedule_renders(self, first: int, last: int) -> None:
-        """Accoda i render mancanti per le pagine visibili + prefetch."""
-        lo = max(0, first - PREFETCH)
-        hi = min(len(self._offsets) - 1, last + PREFETCH)
+    def _schedule_renders(self) -> None:
+        """Accoda i render mancanti per le righe visibili + prefetch.
+
+        Il prefetch lavora sugli indici globali delle righe: nelle modalità
+        paginate pre-renderizza le pagine delle righe adiacenti anche se
+        non fanno parte del layout corrente (il flip le trova già pronte).
+        """
+        first, last = self._visible_rows()
+        if last < first:
+            return
+        pages = []
+        for li in range(first, last + 1):
+            pages.extend(self._rows[self._laid[li]])
+        gfirst, glast = self._laid[first], self._laid[last]
+        for r in (list(range(gfirst - 1, gfirst - PREFETCH - 1, -1))
+                  + list(range(glast + 1, glast + PREFETCH + 1))):
+            if 0 <= r < len(self._rows):
+                pages.extend(self._rows[r])
+
         wanted = set()
         order = []  # prima le visibili, poi il prefetch
-        for i in list(range(first, last + 1)) + \
-                [j for j in range(lo, hi + 1) if j < first or j > last]:
-            key = make_key(i, self.zoom)
-            wanted.add(key)
-            order.append((i, key))
+        for p in pages:
+            key = make_key(p, self.zoom)
+            if key not in wanted:
+                wanted.add(key)
+                order.append((p, key))
         self._wanted = wanted  # sostituzione atomica, letta dai worker
 
-        for i, key in order:
+        for p, key in order:
             if self._cache.get(key) is None and key not in self._pending:
                 self._pending.add(key)
-                task = RenderTask(self.doc, i, self.zoom, key,
+                task = RenderTask(self.doc, p, self.zoom, key,
                                   self._still_needed, self._render_signals)
                 self._pool.start(task)
 
@@ -361,8 +505,7 @@ class PdfView(QAbstractScrollArea):
         self._fallback[page] = (key[1], image)
         # Tieni i fallback solo per poche pagine (memoria limitata sul Pi)
         if len(self._fallback) > 8:
-            first, last = self._visible_range()
-            visible = set(range(first, last + 1)) | {page}
+            visible = set(self._visible_pages()) | {page}
             for stale in [p for p in self._fallback if p not in visible][:4]:
                 del self._fallback[stale]
         if key[1] == round(self.zoom, 3):
@@ -389,12 +532,25 @@ class PdfView(QAbstractScrollArea):
                               anchor_vy=int(event.position().y()))
             event.accept()
             return
+        if self._paged() and self.doc is not None:
+            # A fine/inizio riga la rotella volta pagina, come in Sumatra
+            delta = event.angleDelta().y()
+            vbar = self.verticalScrollBar()
+            if delta < 0 and vbar.value() >= vbar.maximum():
+                self._flip(1)
+                event.accept()
+                return
+            if delta > 0 and vbar.value() <= 0:
+                self._flip(-1)
+                event.accept()
+                return
         super().wheelEvent(event)
 
     def keyPressEvent(self, event) -> None:
         vbar = self.verticalScrollBar()
         key = event.key()
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
+        paged = self._paged() and self.doc is not None
 
         if ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
             self.zoom_in()
@@ -407,13 +563,29 @@ class PdfView(QAbstractScrollArea):
         elif ctrl and key == Qt.Key.Key_0:
             self.fit_page()
         elif key == Qt.Key.Key_PageDown:
-            vbar.setValue(vbar.value() + vbar.pageStep())
+            if paged and vbar.value() >= vbar.maximum():
+                self._flip(1)
+            else:
+                vbar.setValue(vbar.value() + vbar.pageStep())
         elif key == Qt.Key.Key_PageUp:
-            vbar.setValue(vbar.value() - vbar.pageStep())
+            if paged and vbar.value() <= 0:
+                self._flip(-1)
+            else:
+                vbar.setValue(vbar.value() - vbar.pageStep())
+        elif key == Qt.Key.Key_Right and paged:
+            self._flip(1)
+        elif key == Qt.Key.Key_Left and paged:
+            self._flip(-1)
         elif key == Qt.Key.Key_Home and not ctrl:
-            vbar.setValue(0)
+            if paged:
+                self.goto_page(0)
+            else:
+                vbar.setValue(0)
         elif key == Qt.Key.Key_End and not ctrl:
-            vbar.setValue(vbar.maximum())
+            if paged:
+                self.goto_page(self.doc.page_count - 1)
+            else:
+                vbar.setValue(vbar.maximum())
         elif key == Qt.Key.Key_Down:
             vbar.setValue(vbar.value() + vbar.singleStep())
         elif key == Qt.Key.Key_Up:

@@ -8,6 +8,7 @@ opzionale sopra `viewer.document`, senza appesantire il viewer.
 
 from __future__ import annotations
 
+import os
 import sys
 
 from PySide6.QtCore import Qt, QThreadPool
@@ -19,7 +20,9 @@ from PySide6.QtWidgets import (
 
 from .viewer.document import DocumentError
 from .viewer.render import SearchSignals, SearchTask
-from .viewer.view import PdfView
+from .viewer.view import (
+    MODE_BOOK, MODE_CONTINUOUS, MODE_NAMES, MODE_SINGLE, PdfView,
+)
 
 APP_NAME = "PDF Tool"
 
@@ -50,6 +53,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(APP_NAME)
         self.resize(900, 1000)
+        self.setAcceptDrops(True)
 
         self.view = PdfView(self)
         self.search_bar = SearchBar(self)
@@ -63,15 +67,19 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.view, 1)
         self.setCentralWidget(central)
 
-        # Statusbar: pagina e zoom
+        # Statusbar: modalità, pagina e zoom
+        self.mode_label = QLabel(MODE_NAMES[self.view.mode] + "  ")
         self.page_label = QLabel("—")
         self.zoom_label = QLabel("—")
+        self.statusBar().addPermanentWidget(self.mode_label)
         self.statusBar().addPermanentWidget(self.zoom_label)
         self.statusBar().addPermanentWidget(self.page_label)
         self.view.pageChanged.connect(
             lambda cur, tot: self.page_label.setText(f"Pagina {cur} / {tot}"))
         self.view.zoomChanged.connect(
             lambda z: self.zoom_label.setText(f"{round(z * 100)}%  "))
+        self.view.modeChanged.connect(
+            lambda name: self.mode_label.setText(name + "  "))
 
         # Stato ricerca
         self._search_signals = SearchSignals()
@@ -98,6 +106,10 @@ class MainWindow(QMainWindow):
         sc(QKeySequence.StandardKey.Open, self.open_dialog)         # Ctrl+O
         sc(QKeySequence.StandardKey.Quit, self.close)               # Ctrl+Q
         sc("Ctrl+G", self.goto_page_dialog)
+        # Modalità di visualizzazione (stesse scorciatoie di SumatraPDF)
+        sc("Ctrl+6", lambda: self.view.set_mode(MODE_SINGLE))
+        sc("Ctrl+7", lambda: self.view.set_mode(MODE_CONTINUOUS))
+        sc("Ctrl+8", lambda: self.view.set_mode(MODE_BOOK))
         sc(QKeySequence.StandardKey.Find, self.show_search)         # Ctrl+F
         sc(QKeySequence.StandardKey.FindNext, lambda: self._jump_hit(1))    # F3
         sc(QKeySequence.StandardKey.FindPrevious, lambda: self._jump_hit(-1))
@@ -125,9 +137,28 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, f"Impossibile aprire il file:\n{exc}")
             return
         self.hide_search()
-        self.setWindowTitle(f"{path.rsplit('/', 1)[-1]} — {APP_NAME}")
+        self.setWindowTitle(f"{os.path.basename(path)} — {APP_NAME}")
         self.statusBar().showMessage(path)
         self.view.setFocus()
+
+    # ----------------------------------------------------------- drag & drop
+
+    @staticmethod
+    def _dropped_pdf(event) -> str | None:
+        for url in event.mimeData().urls():
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(".pdf"):
+                return url.toLocalFile()
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._dropped_pdf(event) is not None:
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        path = self._dropped_pdf(event)
+        if path is not None:
+            event.acceptProposedAction()
+            self.open_path(path)
 
     def goto_page_dialog(self):
         if self.view.doc is None:

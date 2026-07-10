@@ -4,6 +4,15 @@ Visualizzatore PDF desktop leggero e veloce (stile SumatraPDF), scritto in
 Python con **PyMuPDF** (rendering) e **PySide6** (UI). Fase 1: solo viewer;
 l'editing (annotazioni, firma, form) arriverà in Fase 2 come layer opzionale.
 
+Tre modalità di visualizzazione (`Ctrl+6/7/8`, come SumatraPDF):
+
+- **Pagina singola**: una pagina alla volta; `←`/`→` o `PgUp`/`PgDown` per
+  voltare pagina (anche la rotella, a inizio/fine pagina);
+- **Scorrimento** (default): scroll continuo verticale;
+- **Libro**: copertina da sola, poi coppie di pagine affiancate.
+
+I PDF si aprono anche **trascinandoli sulla finestra**.
+
 ## Avvio
 
 ```bash
@@ -30,6 +39,8 @@ Smoke test senza display: `QT_QPA_PLATFORM=offscreen venv/bin/python tests/smoke
 | `PgUp` / `PgDown`    | Scorri di una schermata                  |
 | `Home` / `End`       | Inizio / fine documento                  |
 | `↑` / `↓`            | Scroll fine                              |
+| `Ctrl+6` / `Ctrl+7` / `Ctrl+8` | Modalità: pagina singola / scorrimento / libro |
+| `←` / `→`            | Pagina precedente / successiva (modalità paginate) |
 | `Ctrl+G`             | Vai a pagina…                            |
 | `Ctrl+F`             | Cerca (Invio: avanti, Maiusc+Invio: indietro, Esc: chiudi) |
 | `F3` / `Maiusc+F3`   | Risultato successivo / precedente        |

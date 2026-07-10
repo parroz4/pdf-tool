@@ -91,15 +91,23 @@ def main():
             else:
                 print(f"OK: modalità '{name}' (pagina corrente {after + 1})")
 
-        # Flip di pagina in modalità singola
+        # Pagina successiva/precedente in modalità singola
         view.set_mode(MODE_SINGLE)
         view.goto_page(0)
-        view._flip(1)
+        view.next_page()
         view.viewport().repaint()
         if view.current_page() != 1:
-            failures.append(f"flip pagina: atteso 2, corrente {view.current_page() + 1}")
+            failures.append(f"next_page: atteso 2, corrente {view.current_page() + 1}")
         else:
-            print("OK: flip alla pagina successiva in modalità singola")
+            print("OK: pagina successiva in modalità singola")
+
+        # La barra di scorrimento deve coprire l'intero documento anche in
+        # modalità paginate (non solo la pagina corrente)
+        vbar = view.verticalScrollBar()
+        if vbar.maximum() <= 0:
+            failures.append("barra di scorrimento non copre l'intero documento in Pagina singola")
+        else:
+            print(f"OK: barra di scorrimento attiva in Pagina singola (max={vbar.maximum()})")
         view.set_mode(MODE_CONTINUOUS)
 
         # Rotazione: a 90/270 gradi largh. e alt. della pagina si scambiano,

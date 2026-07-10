@@ -5,10 +5,15 @@ direttamente sul viewport solo ciò che è visibile. Le pagine vengono
 renderizzate in modo lazy da un QThreadPool (visibili + prefetch delle
 adiacenti) e tenute in una cache LRU.
 
-Il layout è organizzato in "righe" di pagine:
-- Scorrimento (default): una pagina per riga, scroll continuo verticale;
-- Pagina singola: una pagina per riga, paginato (una riga alla volta);
-- Libro: copertina da sola, poi coppie affiancate, paginato.
+Il layout è organizzato in "righe" di pagine, sempre calcolato per l'intero
+documento (indipendentemente dalla modalità), così la barra di scorrimento
+verticale copre sempre tutto il documento e permette di saltare rapidamente
+tra le pagine anche in Pagina singola/Libro, non solo scorrendo con la
+rotella:
+- Scorrimento (default): una pagina per riga;
+- Pagina singola: una pagina per riga (a zoom "adatta pagina" ne è visibile
+  una alla volta, ma si può scorrere liberamente col mouse/scrollbar);
+- Libro: copertina da sola, poi coppie affiancate.
 """
 
 from __future__ import annotations
@@ -38,9 +43,9 @@ FIT_NONE = 0
 FIT_WIDTH = 1
 FIT_PAGE = 2
 
-MODE_SINGLE = 0      # una pagina alla volta (paginato)
+MODE_SINGLE = 0      # una pagina per riga, in genere a zoom "adatta pagina"
 MODE_CONTINUOUS = 1  # scorrimento continuo verticale (default)
-MODE_BOOK = 2        # copertina sola, poi coppie affiancate (paginato)
+MODE_BOOK = 2        # copertina sola, poi coppie di pagine affiancate
 
 MODE_NAMES = {
     MODE_SINGLE: "Pagina singola",
@@ -70,10 +75,9 @@ class PdfView(QAbstractScrollArea):
         # Raggruppamento pagine -> righe (dipende dalla modalità)
         self._rows: list[list[int]] = []
         self._row_of: dict[int, int] = {}
-        self._cur_row = 0               # riga mostrata nelle modalità paginate
 
-        # Layout delle righe effettivamente presenti (coordinate "contenuto"
-        # alla scala corrente). Nelle modalità paginate c'è una sola riga.
+        # Layout di tutte le righe (coordinate "contenuto" alla scala
+        # corrente): sempre l'intero documento, in ogni modalità.
         self._laid: list[int] = []      # indici globali delle righe nel layout
         self._row_y: list[int] = []     # y del bordo alto di ogni riga
         self._row_w: list[int] = []
@@ -117,12 +121,13 @@ class PdfView(QAbstractScrollArea):
         self._last_emitted_page = -1
         self.rotation = 0
         self._build_rows()
-        self._cur_row = 0
-        if self.fit_mode != FIT_NONE:
-            self._apply_fit()
-        self._relayout()
+        self._relayout()  # layout provvisorio: dà a current_page() uno stato valido
         self.verticalScrollBar().setValue(0)
         self.horizontalScrollBar().setValue(0)
+        if self.fit_mode != FIT_NONE:
+            self._apply_fit()
+        else:
+            self._relayout()
         self.viewport().update()
         self._emit_page_changed()
         self.zoomChanged.emit(self.zoom)
@@ -154,34 +159,13 @@ class PdfView(QAbstractScrollArea):
         if self.doc is None:
             return
         self._build_rows()
-        if self._paged():
-            self._show_row(self._row_of.get(cur, 0))
-        else:
-            if self.fit_mode != FIT_NONE:
-                self._apply_fit()
-            else:
-                self._relayout()
-            self.goto_page(cur)
-        self.viewport().update()
-        self._emit_page_changed()
-
-    def _show_row(self, row: int, at_bottom: bool = False) -> None:
-        """Mostra una riga nelle modalità paginate (relayout + scroll)."""
-        self._cur_row = max(0, min(row, len(self._rows) - 1))
         if self.fit_mode != FIT_NONE:
             self._apply_fit()
         else:
             self._relayout()
-        vbar = self.verticalScrollBar()
-        vbar.setValue(vbar.maximum() if at_bottom else 0)
+        self.goto_page(cur)
         self.viewport().update()
         self._emit_page_changed()
-
-    def _flip(self, direction: int) -> None:
-        """Riga successiva (+1) o precedente (-1) nelle modalità paginate."""
-        row = self._cur_row + direction
-        if 0 <= row < len(self._rows):
-            self._show_row(row, at_bottom=(direction < 0))
 
     # --------------------------------------------------------------- layout
 
@@ -199,8 +183,7 @@ class PdfView(QAbstractScrollArea):
         if self.doc is None:
             self._content_w = self._content_h = 0
         else:
-            laid = ([self._cur_row] if self._paged()
-                    else list(range(len(self._rows))))
+            laid = list(range(len(self._rows)))
             y = MARGIN
             max_w = 0
             for li, r in enumerate(laid):
@@ -262,8 +245,6 @@ class PdfView(QAbstractScrollArea):
         """Indice (0-based) della pagina 'corrente' per la statusbar."""
         if self.doc is None or not self._laid:
             return 0
-        if self._paged():
-            return self._rows[self._cur_row][0]
         probe = self.verticalScrollBar().value() + self.viewport().height() // 4
         li = max(0, bisect_right(self._row_y, probe) - 1)
         li = min(li, len(self._laid) - 1)
@@ -332,8 +313,12 @@ class PdfView(QAbstractScrollArea):
         avail_w = max(50, vp.width() - 2 * MARGIN)
         avail_h = max(50, vp.height() - 2 * MARGIN)
         # Il fit si calcola sulle righe (in modalità libro una riga è larga
-        # due pagine); nelle modalità paginate conta solo la riga corrente.
-        rows = [self._rows[self._cur_row]] if self._paged() else self._rows
+        # due pagine); nelle modalità paginate conta solo la riga corrente,
+        # in scorrimento continuo tutte (uno zoom uniforme per il documento).
+        if self._paged():
+            rows = [self._rows[self._row_of[self.current_page()]]]
+        else:
+            rows = self._rows
         zoom = MAX_ZOOM
         for pages in rows:
             dims = [self._dims(p) for p in pages]
@@ -382,12 +367,7 @@ class PdfView(QAbstractScrollArea):
             return
         index = max(0, min(index, self.doc.page_count - 1))
         row = self._row_of[index]
-        if self._paged():
-            self._show_row(row)
-        else:
-            # In modalità continua il layout contiene tutte le righe,
-            # quindi indice globale e indice di layout coincidono.
-            self.verticalScrollBar().setValue(self._row_y[row] - MARGIN)
+        self.verticalScrollBar().setValue(self._row_y[row] - MARGIN)
 
     def state(self) -> dict:
         """Istantanea (pagina, zoom, fit, modalità, rotazione) per la persistenza."""
@@ -418,16 +398,16 @@ class PdfView(QAbstractScrollArea):
             self.goto_page(page)
 
     def next_page(self) -> None:
-        if self._paged():
-            self._flip(1)
-        else:
-            self.goto_page(self.current_page() + 1)
+        # Salta di riga (non di pagina): in modalità libro una riga vale
+        # due pagine, quindi "pagina successiva" non deve fermarsi a metà.
+        row = self._row_of.get(self.current_page(), 0)
+        if row + 1 < len(self._rows):
+            self.goto_page(self._rows[row + 1][0])
 
     def prev_page(self) -> None:
-        if self._paged():
-            self._flip(-1)
-        else:
-            self.goto_page(self.current_page() - 1)
+        row = self._row_of.get(self.current_page(), 0)
+        if row - 1 >= 0:
+            self.goto_page(self._rows[row - 1][0])
 
     # -------------------------------------------------------------- ricerca
 
@@ -464,8 +444,6 @@ class PdfView(QAbstractScrollArea):
         else:
             self._current_hit = (self._current_hit + direction) % len(self._hit_list)
         page, rect = self._hit_list[self._current_hit]
-        if self._paged() and self._row_of[page] != self._cur_row:
-            self._show_row(self._row_of[page])
         geo = self._page_geo.get(page)
         if geo is not None:
             _, _, y, _, _ = geo
@@ -535,9 +513,10 @@ class PdfView(QAbstractScrollArea):
     def _schedule_renders(self) -> None:
         """Accoda i render mancanti per le righe visibili + prefetch.
 
-        Il prefetch lavora sugli indici globali delle righe: nelle modalità
-        paginate pre-renderizza le pagine delle righe adiacenti anche se
-        non fanno parte del layout corrente (il flip le trova già pronte).
+        Il prefetch lavora sugli indici globali delle righe: pre-renderizza
+        anche le pagine appena fuori dal viewport, così scorrendo (con
+        rotella, tasti o trascinando la barra di scorrimento) le si trova
+        già pronte.
         """
         first, last = self._visible_rows()
         if last < first:
@@ -604,25 +583,13 @@ class PdfView(QAbstractScrollArea):
                               anchor_vy=int(event.position().y()))
             event.accept()
             return
-        if self._paged() and self.doc is not None:
-            # A fine/inizio riga la rotella volta pagina, come in Sumatra
-            delta = event.angleDelta().y()
-            vbar = self.verticalScrollBar()
-            if delta < 0 and vbar.value() >= vbar.maximum():
-                self._flip(1)
-                event.accept()
-                return
-            if delta > 0 and vbar.value() <= 0:
-                self._flip(-1)
-                event.accept()
-                return
         super().wheelEvent(event)
 
     def keyPressEvent(self, event) -> None:
         vbar = self.verticalScrollBar()
         key = event.key()
         ctrl = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-        paged = self._paged() and self.doc is not None
+        has_doc = self.doc is not None
 
         if ctrl and key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
             self.zoom_in()
@@ -635,29 +602,17 @@ class PdfView(QAbstractScrollArea):
         elif ctrl and key == Qt.Key.Key_0:
             self.fit_page()
         elif key == Qt.Key.Key_PageDown:
-            if paged and vbar.value() >= vbar.maximum():
-                self._flip(1)
-            else:
-                vbar.setValue(vbar.value() + vbar.pageStep())
+            vbar.setValue(vbar.value() + vbar.pageStep())
         elif key == Qt.Key.Key_PageUp:
-            if paged and vbar.value() <= 0:
-                self._flip(-1)
-            else:
-                vbar.setValue(vbar.value() - vbar.pageStep())
-        elif key == Qt.Key.Key_Right and paged:
-            self._flip(1)
-        elif key == Qt.Key.Key_Left and paged:
-            self._flip(-1)
+            vbar.setValue(vbar.value() - vbar.pageStep())
+        elif key == Qt.Key.Key_Right and has_doc:
+            self.next_page()
+        elif key == Qt.Key.Key_Left and has_doc:
+            self.prev_page()
         elif key == Qt.Key.Key_Home and not ctrl:
-            if paged:
-                self.goto_page(0)
-            else:
-                vbar.setValue(0)
+            vbar.setValue(0)
         elif key == Qt.Key.Key_End and not ctrl:
-            if paged:
-                self.goto_page(self.doc.page_count - 1)
-            else:
-                vbar.setValue(vbar.maximum())
+            vbar.setValue(vbar.maximum())
         elif key == Qt.Key.Key_Down:
             vbar.setValue(vbar.value() + vbar.singleStep())
         elif key == Qt.Key.Key_Up:

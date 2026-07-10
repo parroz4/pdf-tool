@@ -8,10 +8,11 @@ opzionale sopra `viewer.document`, senza appesantire il viewer.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 
-from PySide6.QtCore import Qt, QThreadPool
+from PySide6.QtCore import QSettings, Qt, QThreadPool
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QApplication, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
@@ -27,6 +28,8 @@ from .viewer.view import (
 )
 
 APP_NAME = "PDF Tool"
+MAX_RECENT_FILES = 10
+MAX_REMEMBERED_DOCS = 50
 
 
 class SearchBar(QWidget):
@@ -107,7 +110,16 @@ class MainWindow(QMainWindow):
         self._search_generation = 0
         self._last_query = ""
 
+        # Impostazioni persistenti: file .ini per-utente, niente registro di
+        # Windows (coerente con lo spirito "portatile" del tool).
+        self._settings = QSettings(
+            QSettings.Format.IniFormat, QSettings.Scope.UserScope,
+            "PDFTool", "PDFTool")
+        self._recent_files = self._load_recent_files()
+        self._doc_states = self._load_doc_states()
+
         self._setup_menu()
+        self._rebuild_recent_menu()
         self._setup_search_bar_keys()
 
         if path:
@@ -135,6 +147,7 @@ class MainWindow(QMainWindow):
 
         m_file = bar.addMenu("&File")
         act(m_file, "&Apri…", self.open_dialog, QKeySequence.StandardKey.Open)
+        self._recent_menu = m_file.addMenu("Apri &recente")
         m_file.addSeparator()
         act(m_file, "&Esci", self.close, QKeySequence.StandardKey.Quit)
 
@@ -207,6 +220,8 @@ class MainWindow(QMainWindow):
             self.open_path(path)
 
     def open_path(self, path: str):
+        if self.view.doc is not None:
+            self._remember_doc_state(self.view.doc.path)
         try:
             self.view.load(path)
         except DocumentError as exc:
@@ -217,7 +232,71 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(path)
         self.outline_panel.populate(self.view.doc.outline())
         self.thumb_panel.populate(self.view.doc)
+        state = self._doc_states.get(os.path.abspath(path))
+        if state:
+            self.view.restore_state(state)
+        self._add_recent_file(path)
+        self._save_settings()
         self.view.setFocus()
+
+    # ------------------------------------------------------- file recenti
+
+    def _load_recent_files(self) -> list[str]:
+        value = self._settings.value("recent/files", [])
+        if isinstance(value, str):
+            value = [value] if value else []
+        return [p for p in value if os.path.isfile(p)][:MAX_RECENT_FILES]
+
+    def _add_recent_file(self, path: str) -> None:
+        path = os.path.abspath(path)
+        self._recent_files = [p for p in self._recent_files if p != path]
+        self._recent_files.insert(0, path)
+        del self._recent_files[MAX_RECENT_FILES:]
+        self._rebuild_recent_menu()
+
+    def _rebuild_recent_menu(self) -> None:
+        self._recent_menu.clear()
+        if not self._recent_files:
+            empty = QAction("(nessuno)", self)
+            empty.setEnabled(False)
+            self._recent_menu.addAction(empty)
+            return
+        for recent_path in self._recent_files:
+            action = QAction(os.path.basename(recent_path), self)
+            action.setStatusTip(recent_path)
+            action.triggered.connect(
+                lambda checked=False, p=recent_path: self.open_path(p))
+            self._recent_menu.addAction(action)
+        self._recent_menu.addSeparator()
+        clear_action = QAction("Cancella elenco", self)
+        clear_action.triggered.connect(self._clear_recent_files)
+        self._recent_menu.addAction(clear_action)
+
+    def _clear_recent_files(self) -> None:
+        self._recent_files = []
+        self._rebuild_recent_menu()
+        self._save_settings()
+
+    # -------------------------------------------------- stato per documento
+
+    def _load_doc_states(self) -> dict:
+        raw = self._settings.value("documents/states", "")
+        try:
+            return json.loads(raw) if raw else {}
+        except (TypeError, ValueError):
+            return {}
+
+    def _remember_doc_state(self, path: str) -> None:
+        key = os.path.abspath(path)
+        self._doc_states.pop(key, None)
+        self._doc_states[key] = self.view.state()
+        while len(self._doc_states) > MAX_REMEMBERED_DOCS:
+            del self._doc_states[next(iter(self._doc_states))]
+
+    def _save_settings(self) -> None:
+        self._settings.setValue("recent/files", self._recent_files)
+        self._settings.setValue("documents/states", json.dumps(self._doc_states))
+        self._settings.sync()
 
     # ----------------------------------------------------------- drag & drop
 
@@ -301,7 +380,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self.view.doc is not None:
+            self._remember_doc_state(self.view.doc.path)
             self.view.doc.close()
+        self._save_settings()
         super().closeEvent(event)
 
 

@@ -358,6 +358,29 @@ class PdfView(QAbstractScrollArea):
             # quindi indice globale e indice di layout coincidono.
             self.verticalScrollBar().setValue(self._row_y[row] - MARGIN)
 
+    def state(self) -> dict:
+        """Istantanea (pagina, zoom, fit, modalità) per la persistenza."""
+        return {"page": self.current_page(), "zoom": self.zoom,
+                "fit_mode": self.fit_mode, "mode": self.mode}
+
+    def restore_state(self, state: dict) -> None:
+        """Ripristina un'istantanea prodotta da `state()` sul documento aperto."""
+        if self.doc is None:
+            return
+        mode = state.get("mode")
+        if mode is not None and mode != self.mode:
+            self.set_mode(mode)
+        fit_mode = state.get("fit_mode", FIT_NONE)
+        if fit_mode != FIT_NONE:
+            self._apply_fit(fit_mode)
+        else:
+            zoom = state.get("zoom")
+            if zoom:
+                self.set_zoom(zoom)
+        page = state.get("page")
+        if page is not None:
+            self.goto_page(page)
+
     def next_page(self) -> None:
         if self._paged():
             self._flip(1)

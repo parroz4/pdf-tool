@@ -8,13 +8,19 @@ della prima pagina (cache popolata), ricerca testo, nessuna eccezione.
 
 import os
 import sys
+import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QTimer  # noqa: E402
+from PySide6.QtCore import QSettings, QTimer  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
+
+# Le impostazioni persistenti (file recenti, stato per documento) vanno in
+# una directory temporanea: il test non deve toccare la config reale.
+_settings_dir = tempfile.mkdtemp(prefix="pdftool-test-settings-")
+QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, _settings_dir)
 
 from pdf_tool.app import MainWindow  # noqa: E402
 from pdf_tool.viewer.render import make_key  # noqa: E402
@@ -95,6 +101,29 @@ def main():
         else:
             print("OK: flip alla pagina successiva in modalità singola")
         view.set_mode(MODE_CONTINUOUS)
+
+        # Persistenza: pagina/zoom/modalità devono sopravvivere alla chiusura
+        view.goto_page(3)
+        view.set_zoom(2.0)
+        view.set_mode(MODE_SINGLE)
+        window._remember_doc_state(view.doc.path)
+        window._save_settings()
+        window.close()
+
+        window2 = MainWindow(PDF)
+        window2.show()
+        v2 = window2.view
+        if (v2.current_page(), round(v2.zoom, 2), v2.mode) != (3, 2.0, MODE_SINGLE):
+            failures.append(
+                f"stato non ripristinato: pagina {v2.current_page()}, "
+                f"zoom {v2.zoom:.2f}, modo {v2.mode} (atteso 3, 2.00, {MODE_SINGLE})")
+        else:
+            print("OK: pagina/zoom/modalità ripristinati alla riapertura")
+        if window2._recent_files and os.path.samefile(window2._recent_files[0], PDF):
+            print("OK: file recenti aggiornato")
+        else:
+            failures.append("file recenti non aggiornato correttamente")
+        window2.close()
 
         app.quit()
 

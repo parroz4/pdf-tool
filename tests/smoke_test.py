@@ -102,6 +102,27 @@ def main():
             print("OK: flip alla pagina successiva in modalità singola")
         view.set_mode(MODE_CONTINUOUS)
 
+        # Rotazione: a 90/270 gradi largh. e alt. della pagina si scambiano,
+        # e la cache non deve confondere immagini a rotazioni diverse
+        view.goto_page(0)
+        w0, h0 = view._page_geo[0][3], view._page_geo[0][4]
+        view.rotate_right()
+        view.viewport().repaint()
+        w90, h90 = view._page_geo[0][3], view._page_geo[0][4]
+        if (w90, h90) != (h0, w0):
+            failures.append(f"rotazione 90°: geometria {w0}x{h0} -> {w90}x{h90} (atteso scambio)")
+        else:
+            print(f"OK: rotazione 90° (geometria {w0}x{h0} -> {w90}x{h90})")
+        key0 = make_key(0, view.zoom, 0)
+        key90 = make_key(0, view.zoom, 90)
+        if view._cache.get(key0) is not None and view._cache.get(key90) is not None \
+                and view._cache.get(key0) is view._cache.get(key90):
+            failures.append("cache non distingue rotazioni diverse")
+        view.rotate_left()
+        view.viewport().repaint()
+        if view.rotation != 0:
+            failures.append(f"rotazione: atteso ritorno a 0°, corrente {view.rotation}")
+
         # Persistenza: pagina/zoom/modalità devono sopravvivere alla chiusura
         view.goto_page(3)
         view.set_zoom(2.0)

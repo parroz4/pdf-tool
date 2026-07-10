@@ -12,12 +12,13 @@ import json
 import os
 import sys
 
-from PySide6.QtCore import QSettings, Qt, QThreadPool
-from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
+from PySide6.QtCore import QRect, QSettings, Qt, QThreadPool
+from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QPainter, QShortcut
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
-    QApplication, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
-    QLineEdit, QMainWindow, QMessageBox, QTabWidget, QToolButton, QVBoxLayout,
-    QWidget,
+    QApplication, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressDialog, QTabWidget,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from .viewer.document import DocumentError
@@ -30,6 +31,11 @@ from .viewer.view import (
 APP_NAME = "PDF Tool"
 MAX_RECENT_FILES = 10
 MAX_REMEMBERED_DOCS = 50
+# _MEIPASS: radice dei dati bundled da PyInstaller (onedir e onefile);
+# in sviluppo è semplicemente la root del progetto.
+_ASSETS_ROOT = getattr(
+    sys, "_MEIPASS", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ICON_PATH = os.path.join(_ASSETS_ROOT, "assets", "icon.png")
 
 
 class SearchBar(QWidget):
@@ -59,6 +65,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle(APP_NAME)
         self.resize(900, 1000)
         self.setAcceptDrops(True)
+        if os.path.isfile(ICON_PATH):
+            self.setWindowIcon(QIcon(ICON_PATH))
 
         self.view = PdfView(self)
         self.search_bar = SearchBar(self)
@@ -149,6 +157,12 @@ class MainWindow(QMainWindow):
         act(m_file, "&Apri…", self.open_dialog, QKeySequence.StandardKey.Open)
         self._recent_menu = m_file.addMenu("Apri &recente")
         m_file.addSeparator()
+        act(m_file, "&Stampa…", self.print_dialog, QKeySequence.StandardKey.Print)
+        if sys.platform == "win32":
+            m_file.addSeparator()
+            act(m_file, "Imposta come app &predefinita per i PDF…",
+                self.register_default_windows)
+        m_file.addSeparator()
         act(m_file, "&Esci", self.close, QKeySequence.StandardKey.Quit)
 
         m_view = bar.addMenu("&Visualizza")
@@ -170,6 +184,9 @@ class MainWindow(QMainWindow):
         act(m_view, "Zoom &100%", lambda: self.view.set_zoom(1.0), "Ctrl+1")
         act(m_view, "Adatta &larghezza", self.view.fit_width, "Ctrl+2")
         act(m_view, "Adatta &pagina", self.view.fit_page, "Ctrl+0")
+        m_view.addSeparator()
+        act(m_view, "Ruota a &destra", self.view.rotate_right, "Ctrl+]")
+        act(m_view, "Ruota a &sinistra", self.view.rotate_left, "Ctrl+[")
         m_view.addSeparator()
         sidebar_action = QAction("&Pannello laterale (indice/miniature)", self)
         sidebar_action.setCheckable(True)
@@ -317,6 +334,99 @@ class MainWindow(QMainWindow):
             event.acceptProposedAction()
             self.open_path(path)
 
+    # --------------------------------------------------------------- stampa
+
+    def print_dialog(self):
+        if self.view.doc is None:
+            return
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setFromTo(1, self.view.doc.page_count)
+        dialog = QPrintDialog(printer, self)
+        dialog.setMinMax(1, self.view.doc.page_count)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._print(printer)
+
+    def _print(self, printer: QPrinter):
+        doc = self.view.doc
+        if printer.printRange() == QPrinter.PrintRange.PageRange:
+            first, last = printer.fromPage() - 1, printer.toPage() - 1
+        else:
+            first, last = 0, doc.page_count - 1
+        rotation = self.view.rotation
+        scale = printer.resolution() / 72.0
+
+        progress = QProgressDialog("Stampa in corso…", "Annulla", first, last + 1, self)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+
+        painter = QPainter(printer)
+        target = painter.viewport()
+        first_page = True
+        for i in range(first, last + 1):
+            progress.setValue(i)
+            if progress.wasCanceled():
+                break
+            if not first_page:
+                printer.newPage()
+            first_page = False
+            image = doc.render(i, scale, rotation)
+            ratio = image.width() / image.height()
+            target_ratio = target.width() / target.height()
+            if ratio > target_ratio:
+                w, h = target.width(), round(target.width() / ratio)
+            else:
+                h, w = target.height(), round(target.height() * ratio)
+            x = target.x() + (target.width() - w) // 2
+            y = target.y() + (target.height() - h) // 2
+            painter.drawImage(QRect(x, y, w, h), image)
+        painter.end()
+        progress.setValue(last + 1)
+
+    # -------------------------------------------- app predefinita (Windows)
+
+    def register_default_windows(self):
+        import subprocess
+        import winreg
+
+        exe = sys.executable if getattr(sys, "frozen", False) else None
+        if exe is None:
+            QMessageBox.information(
+                self, APP_NAME,
+                "Questa funzione è disponibile solo nella build Windows "
+                "distribuita (PDFTool.exe), non in esecuzione da sorgente.")
+            return
+        prog_id = "PDFTool.Document"
+        classes = winreg.HKEY_CURRENT_USER
+        try:
+            with winreg.CreateKey(classes, rf"Software\Classes\{prog_id}\shell\open\command") as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{exe}" "%1"')
+            with winreg.CreateKey(classes, rf"Software\Classes\{prog_id}\DefaultIcon") as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, f'"{exe}",0')
+            with winreg.CreateKey(classes, rf"Software\Classes\{prog_id}") as k:
+                winreg.SetValueEx(k, "", 0, winreg.REG_SZ, "Documento PDF")
+            with winreg.CreateKey(classes, r"Software\PDFTool\Capabilities") as k:
+                winreg.SetValueEx(k, "ApplicationName", 0, winreg.REG_SZ, APP_NAME)
+                winreg.SetValueEx(k, "ApplicationDescription", 0, winreg.REG_SZ,
+                                   "Visualizzatore PDF leggero e veloce")
+            with winreg.CreateKey(classes, r"Software\PDFTool\Capabilities\FileAssociations") as k:
+                winreg.SetValueEx(k, ".pdf", 0, winreg.REG_SZ, prog_id)
+            with winreg.CreateKey(classes, r"Software\RegisteredApplications") as k:
+                winreg.SetValueEx(k, "PDFTool", 0, winreg.REG_SZ,
+                                   r"Software\PDFTool\Capabilities")
+        except OSError as exc:
+            QMessageBox.critical(self, APP_NAME, f"Impossibile scrivere il registro:\n{exc}")
+            return
+        # Windows protegge la scelta effettiva dell'app predefinita (dal
+        # tasto utente): possiamo solo registrarci come candidati e aprire
+        # le impostazioni perché l'utente completi la scelta.
+        subprocess.Popen(["cmd", "/c", "start", "", "ms-settings:defaultapps"])
+        QMessageBox.information(
+            self, APP_NAME,
+            "PDF Tool è ora registrato tra le app disponibili per i PDF.\n\n"
+            "Nelle Impostazioni di Windows che si sono aperte, scegli "
+            "'PDF Tool' come app predefinita per i file .pdf.")
+
     def goto_page_dialog(self):
         if self.view.doc is None:
             return
@@ -390,6 +500,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv if argv is None else argv)
     app = QApplication(argv)
     app.setApplicationName(APP_NAME)
+    if os.path.isfile(ICON_PATH):
+        app.setWindowIcon(QIcon(ICON_PATH))
     path = argv[1] if len(argv) > 1 else None
     window = MainWindow(path)
     window.show()

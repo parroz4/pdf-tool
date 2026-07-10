@@ -17,6 +17,18 @@ Tutte le funzioni sono accessibili dalla **barra dei menu** (File, Visualizza,
 Vai, Cerca); le scorciatoie sono indicate accanto a ogni voce, quindi non
 serve impararle a memoria.
 
+Altre funzioni:
+
+- **Pannello laterale** (`F9`): indice/segnalibri del PDF e miniature delle
+  pagine, per navigare nei documenti lunghi;
+- **File recenti** (menu File) e **persistenza per documento**: pagina, zoom,
+  modalità e rotazione si ricordano automaticamente per ogni file;
+- **Rotazione** (`Ctrl+]` / `Ctrl+[`) e **stampa** (`Ctrl+P`);
+- Su Windows, *File → Imposta come app predefinita per i PDF* registra PDF
+  Tool tra le app disponibili e apre le Impostazioni di Windows per
+  completare la scelta (richiede la build distribuita, non l'esecuzione da
+  sorgente).
+
 ## Avvio
 
 ```bash
@@ -48,6 +60,9 @@ Smoke test senza display: `QT_QPA_PLATFORM=offscreen venv/bin/python tests/smoke
 | `Ctrl+G`             | Vai a pagina…                            |
 | `Ctrl+F`             | Cerca (Invio: avanti, Maiusc+Invio: indietro, Esc: chiudi) |
 | `F3` / `Maiusc+F3`   | Risultato successivo / precedente        |
+| `F9`                 | Mostra/nascondi pannello laterale        |
+| `Ctrl+]` / `Ctrl+[`  | Ruota a destra / sinistra                |
+| `Ctrl+P`             | Stampa…                                  |
 
 ## Build portatile per Windows
 

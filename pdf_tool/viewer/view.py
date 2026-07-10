@@ -65,6 +65,7 @@ class PdfView(QAbstractScrollArea):
         self.zoom = 1.0
         self.fit_mode = FIT_WIDTH
         self.mode = MODE_CONTINUOUS
+        self.rotation = 0   # 0/90/180/270, in senso orario
 
         # Raggruppamento pagine -> righe (dipende dalla modalità)
         self._rows: list[list[int]] = []
@@ -114,6 +115,7 @@ class PdfView(QAbstractScrollArea):
         self._pending.clear()
         self.clear_search()
         self._last_emitted_page = -1
+        self.rotation = 0
         self._build_rows()
         self._cur_row = 0
         if self.fit_mode != FIT_NONE:
@@ -183,6 +185,13 @@ class PdfView(QAbstractScrollArea):
 
     # --------------------------------------------------------------- layout
 
+    def _dims(self, page: int) -> tuple[float, float]:
+        """Dimensioni (largh, alt) in punti PDF, scambiate se ruotata di 90/270."""
+        w_pt, h_pt = self.doc.page_sizes[page]
+        if self.rotation % 180 == 90:
+            w_pt, h_pt = h_pt, w_pt
+        return w_pt, h_pt
+
     def _relayout(self) -> None:
         """Ricalcola geometria delle righe e range delle scrollbar."""
         self._laid, self._row_y, self._row_w, self._row_h = [], [], [], []
@@ -196,10 +205,9 @@ class PdfView(QAbstractScrollArea):
             max_w = 0
             for li, r in enumerate(laid):
                 pages = self._rows[r]
-                widths = [max(1, round(self.doc.page_sizes[p][0] * self.zoom))
-                          for p in pages]
-                heights = [max(1, round(self.doc.page_sizes[p][1] * self.zoom))
-                           for p in pages]
+                dims = [self._dims(p) for p in pages]
+                widths = [max(1, round(w * self.zoom)) for w, _ in dims]
+                heights = [max(1, round(h * self.zoom)) for _, h in dims]
                 row_w = sum(widths) + GAP * (len(pages) - 1)
                 row_h = max(heights)
                 self._laid.append(r)
@@ -292,6 +300,28 @@ class PdfView(QAbstractScrollArea):
     def fit_page(self) -> None:
         self._apply_fit(FIT_PAGE)
 
+    # ------------------------------------------------------------- rotazione
+
+    def rotate_right(self) -> None:
+        self._set_rotation((self.rotation + 90) % 360)
+
+    def rotate_left(self) -> None:
+        self._set_rotation((self.rotation - 90) % 360)
+
+    def _set_rotation(self, degrees: int) -> None:
+        if self.doc is None:
+            self.rotation = degrees
+            return
+        cur = self.current_page()
+        self.rotation = degrees
+        self._fallback.clear()  # evita un fotogramma con l'orientamento vecchio
+        if self.fit_mode != FIT_NONE:
+            self._apply_fit()
+        else:
+            self._relayout()
+        self.goto_page(cur)
+        self.viewport().update()
+
     def _apply_fit(self, mode: int | None = None) -> None:
         if mode is None:
             mode = self.fit_mode
@@ -306,8 +336,9 @@ class PdfView(QAbstractScrollArea):
         rows = [self._rows[self._cur_row]] if self._paged() else self._rows
         zoom = MAX_ZOOM
         for pages in rows:
-            w_pt = sum(self.doc.page_sizes[p][0] for p in pages)
-            h_pt = max(self.doc.page_sizes[p][1] for p in pages)
+            dims = [self._dims(p) for p in pages]
+            w_pt = sum(w for w, _ in dims)
+            h_pt = max(h for _, h in dims)
             gaps = GAP * (len(pages) - 1)
             z = (avail_w - gaps) / w_pt
             if mode == FIT_PAGE:
@@ -329,7 +360,7 @@ class PdfView(QAbstractScrollArea):
         offset_pt = (y - self._row_y[li]) / self.zoom
         # Clamp dentro la riga: un anchor fuori scala non deve mai
         # proiettare lo scroll lontano dal punto reale.
-        row_h_pt = max(self.doc.page_sizes[p][1] for p in self._rows[self._laid[li]])
+        row_h_pt = max(self._dims(p)[1] for p in self._rows[self._laid[li]])
         offset_pt = max(0.0, min(offset_pt, row_h_pt))
         return (li, offset_pt)
 
@@ -359,14 +390,19 @@ class PdfView(QAbstractScrollArea):
             self.verticalScrollBar().setValue(self._row_y[row] - MARGIN)
 
     def state(self) -> dict:
-        """Istantanea (pagina, zoom, fit, modalità) per la persistenza."""
+        """Istantanea (pagina, zoom, fit, modalità, rotazione) per la persistenza."""
         return {"page": self.current_page(), "zoom": self.zoom,
-                "fit_mode": self.fit_mode, "mode": self.mode}
+                "fit_mode": self.fit_mode, "mode": self.mode,
+                "rotation": self.rotation}
 
     def restore_state(self, state: dict) -> None:
         """Ripristina un'istantanea prodotta da `state()` sul documento aperto."""
         if self.doc is None:
             return
+        rotation = state.get("rotation")
+        if rotation is not None and rotation != self.rotation:
+            self.rotation = rotation % 360
+            self._fallback.clear()
         mode = state.get("mode")
         if mode is not None and mode != self.mode:
             self.set_mode(mode)
@@ -465,7 +501,7 @@ class PdfView(QAbstractScrollArea):
                 x = row_x + x_rel - xoff
                 y = gy - yoff
 
-                key = make_key(p, self.zoom)
+                key = make_key(p, self.zoom, self.rotation)
                 image = self._cache.get(key)
                 if image is not None:
                     painter.drawImage(x, y, image)
@@ -518,7 +554,7 @@ class PdfView(QAbstractScrollArea):
         wanted = set()
         order = []  # prima le visibili, poi il prefetch
         for p in pages:
-            key = make_key(p, self.zoom)
+            key = make_key(p, self.zoom, self.rotation)
             if key not in wanted:
                 wanted.add(key)
                 order.append((p, key))
@@ -528,7 +564,8 @@ class PdfView(QAbstractScrollArea):
             if self._cache.get(key) is None and key not in self._pending:
                 self._pending.add(key)
                 task = RenderTask(self.doc, p, self.zoom, key,
-                                  self._still_needed, self._render_signals)
+                                  self._still_needed, self._render_signals,
+                                  rotation=self.rotation)
                 self._pool.start(task)
 
     def _still_needed(self, key) -> bool:
@@ -543,7 +580,7 @@ class PdfView(QAbstractScrollArea):
             visible = set(self._visible_pages()) | {page}
             for stale in [p for p in self._fallback if p not in visible][:4]:
                 del self._fallback[stale]
-        if key[1] == round(self.zoom, 3):
+        if key[1] == round(self.zoom, 3) and key[2] == self.rotation:
             self.viewport().update()
 
     # ---------------------------------------------------------------- eventi

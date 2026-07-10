@@ -12,6 +12,7 @@ from PySide6 import __file__ as _pyside_file  # noqa: F401 - fail fast se manca
 a = Analysis(
     ["../launcher.py"],
     pathex=[".."],
+    datas=[("../assets", "assets")],
     excludes=[
         # Moduli Qt pesanti che il viewer non usa
         "PySide6.QtWebEngineCore",
@@ -35,6 +36,7 @@ exe = EXE(
     name="PDFTool",
     console=False,
     upx=False,
+    icon="../assets/icon.ico",
 )
 
 coll = COLLECT(

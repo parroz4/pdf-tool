@@ -11,12 +11,12 @@ from collections import OrderedDict
 
 from PySide6.QtCore import QObject, QRunnable, Signal
 
-# Chiave di cache: (indice_pagina, scala_arrotondata)
-CacheKey = tuple[int, float]
+# Chiave di cache: (indice_pagina, scala_arrotondata, rotazione)
+CacheKey = tuple[int, float, int]
 
 
-def make_key(page: int, scale: float) -> CacheKey:
-    return (page, round(scale, 3))
+def make_key(page: int, scale: float, rotation: int = 0) -> CacheKey:
+    return (page, round(scale, 3), rotation)
 
 
 class LRUImageCache:
@@ -57,7 +57,8 @@ class RenderTask(QRunnable):
     """Renderizza una singola pagina in un thread del pool."""
 
     def __init__(self, document, page: int, scale: float,
-                 key: CacheKey, still_needed, signals: RenderSignals):
+                 key: CacheKey, still_needed, signals: RenderSignals,
+                 rotation: int = 0):
         super().__init__()
         self.setAutoDelete(True)
         self._document = document
@@ -66,6 +67,7 @@ class RenderTask(QRunnable):
         self._key = key
         self._still_needed = still_needed  # callable(key) -> bool
         self._signals = signals
+        self._rotation = rotation
 
     def run(self):
         # Se nel frattempo l'utente ha scrollato/zoomato altrove, non
@@ -73,7 +75,7 @@ class RenderTask(QRunnable):
         if not self._still_needed(self._key):
             return
         try:
-            image = self._document.render(self._page, self._scale)
+            image = self._document.render(self._page, self._scale, self._rotation)
         except Exception:
             return  # pagina corrotta o documento chiuso: ignora
         self._signals.done.emit(self._page, self._key, image)

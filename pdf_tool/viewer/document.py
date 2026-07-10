@@ -49,16 +49,18 @@ class Document:
 
     # ------------------------------------------------------------------ render
 
-    def render(self, index: int, scale: float):
+    def render(self, index: int, scale: float, rotation: int = 0):
         """Renderizza una pagina e restituisce una QImage RGB.
 
+        `rotation` è una rotazione a scelta dell'utente (0/90/180/270),
+        indipendente da quella eventualmente incorporata nel PDF stesso.
         Pensato per essere chiamato da un thread worker (mai dal thread UI).
         """
         from PySide6.QtGui import QImage
 
         with self._lock:
             page = self._doc[index]
-            matrix = pymupdf.Matrix(scale, scale)
+            matrix = pymupdf.Matrix(scale, scale).prerotate(rotation)
             pix = page.get_pixmap(matrix=matrix, alpha=False)
 
         image = QImage(

@@ -13,7 +13,9 @@ import os
 import sys
 
 from PySide6.QtCore import QRect, QSettings, Qt, QThreadPool
-from PySide6.QtGui import QAction, QActionGroup, QIcon, QKeySequence, QPainter, QShortcut
+from PySide6.QtGui import (
+    QAction, QActionGroup, QIcon, QImage, QKeySequence, QPainter, QShortcut,
+)
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (
     QApplication, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog,
@@ -26,11 +28,15 @@ from .viewer.render import SearchSignals, SearchTask
 from .viewer.sidebar import OutlinePanel, ThumbnailPanel
 from .viewer.view import (
     MODE_BOOK, MODE_CONTINUOUS, MODE_NAMES, MODE_SINGLE, PdfView,
+    TOOL_ADD_IMAGE, TOOL_ADD_TEXT, TOOL_FORM,
 )
 
 APP_NAME = "PDF Tool"
 MAX_RECENT_FILES = 10
 MAX_REMEMBERED_DOCS = 50
+ADD_TEXT_SIZE_PT = (240, 50)   # larghezza, altezza di default per il testo inserito
+ADD_IMAGE_WIDTH_PT = 140       # larghezza di default per le immagini inserite
+CHECKBOX_OFF_VALUES = ("off", "", "0", "false", "none")
 # _MEIPASS: radice dei dati bundled da PyInstaller (onedir e onefile);
 # in sviluppo è semplicemente la root del progetto.
 _ASSETS_ROOT = getattr(
@@ -95,8 +101,11 @@ class MainWindow(QMainWindow):
         self.sidebar_dock.hide()
         self.outline_panel.pageRequested.connect(self.view.goto_page)
         self.thumb_panel.pageRequested.connect(self.view.goto_page)
+        self.thumb_panel.pageMoveRequested.connect(self._move_page)
+        self.thumb_panel.pageDeleteRequested.connect(self._delete_page)
         self.view.pageChanged.connect(
             lambda cur, tot: self.thumb_panel.set_current_page(cur - 1))
+        self.view.editRequested.connect(self._on_edit_requested)
 
         # Statusbar: modalità, pagina e zoom
         self.mode_label = QLabel(MODE_NAMES[self.view.mode] + "  ")
@@ -213,6 +222,28 @@ class MainWindow(QMainWindow):
         act(m_search, "Risultato &precedente", lambda: self._jump_hit(-1),
             QKeySequence.StandardKey.FindPrevious)
 
+        m_edit = bar.addMenu("&Modifica")
+        self._tool_actions = {}
+        for tool, label, seq in (
+                (TOOL_FORM, "&Compila modulo (clic su un campo)", "Ctrl+Shift+F"),
+                (TOOL_ADD_TEXT, "Aggiungi &testo (clic sulla pagina)", "Ctrl+Shift+T"),
+                (TOOL_ADD_IMAGE, "Aggiungi &immagine (clic sulla pagina)", "Ctrl+Shift+I")):
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setShortcut(QKeySequence(seq))
+            action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+            action.toggled.connect(lambda checked, t=tool: self._toggle_tool(t, checked))
+            m_edit.addAction(action)
+            self._tool_actions[tool] = action
+
+        m_doc = bar.addMenu("&Documento")
+        act(m_doc, "&Unisci PDF…", self.merge_pdf_dialog)
+        act(m_doc, "Elimina pagina &corrente", self._delete_current_page)
+        m_doc.addSeparator()
+        act(m_doc, "&Salva", self.save_document, QKeySequence.StandardKey.Save)
+        act(m_doc, "Salva con &nome…", self.save_document_as,
+            QKeySequence.StandardKey.SaveAs)
+
     def _goto_last_page(self):
         if self.view.doc is not None:
             self.view.goto_page(self.view.doc.page_count - 1)
@@ -237,6 +268,8 @@ class MainWindow(QMainWindow):
             self.open_path(path)
 
     def open_path(self, path: str):
+        if not self._confirm_discard_changes():
+            return
         if self.view.doc is not None:
             self._remember_doc_state(self.view.doc.path)
         try:
@@ -245,7 +278,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, APP_NAME, f"Impossibile aprire il file:\n{exc}")
             return
         self.hide_search()
-        self.setWindowTitle(f"{os.path.basename(path)} — {APP_NAME}")
+        self._deactivate_tools()
+        self._update_title()
         self.statusBar().showMessage(path)
         self.outline_panel.populate(self.view.doc.outline())
         self.thumb_panel.populate(self.view.doc)
@@ -255,6 +289,209 @@ class MainWindow(QMainWindow):
         self._add_recent_file(path)
         self._save_settings()
         self.view.setFocus()
+
+    def _update_title(self) -> None:
+        doc = self.view.doc
+        if doc is None:
+            self.setWindowTitle(APP_NAME)
+            return
+        dirty = "• " if doc.dirty else ""
+        self.setWindowTitle(f"{dirty}{os.path.basename(doc.path)} — {APP_NAME}")
+
+    def _confirm_discard_changes(self) -> bool:
+        """Se ci sono modifiche non salvate, chiede conferma. False = annulla."""
+        doc = self.view.doc
+        if doc is None or not doc.dirty:
+            return True
+        reply = QMessageBox.question(
+            self, APP_NAME,
+            f"'{os.path.basename(doc.path)}' ha modifiche non salvate. Salvarle?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save)
+        if reply == QMessageBox.StandardButton.Cancel:
+            return False
+        if reply == QMessageBox.StandardButton.Save:
+            try:
+                doc.save()
+            except Exception as exc:
+                QMessageBox.critical(self, APP_NAME, f"Salvataggio non riuscito:\n{exc}")
+                return False
+        return True
+
+    # -------------------------------------------------------------- editing
+
+    def _toggle_tool(self, tool: str, checked: bool) -> None:
+        if checked:
+            for t, action in self._tool_actions.items():
+                if t != tool:
+                    action.blockSignals(True)
+                    action.setChecked(False)
+                    action.blockSignals(False)
+            self.view.set_tool(tool)
+            hints = {
+                TOOL_FORM: "Compila modulo: clicca su un campo per modificarlo.",
+                TOOL_ADD_TEXT: "Aggiungi testo: clicca sulla pagina dove inserirlo.",
+                TOOL_ADD_IMAGE: "Aggiungi immagine: clicca sulla pagina dove inserirla.",
+            }
+            self.statusBar().showMessage(hints[tool])
+        elif self.view.tool == tool:
+            self.view.set_tool(None)
+            self.statusBar().clearMessage()
+
+    def _deactivate_tools(self) -> None:
+        for action in self._tool_actions.values():
+            action.setChecked(False)
+        self.view.set_tool(None)
+
+    def _on_edit_requested(self, tool: str, page: int, point: tuple) -> None:
+        if tool == TOOL_FORM:
+            self._fill_form_field_at(page, point)
+        elif tool == TOOL_ADD_TEXT:
+            self._add_text_at(page, point)
+        elif tool == TOOL_ADD_IMAGE:
+            self._add_image_at(page, point)
+
+    def _fill_form_field_at(self, page: int, point: tuple) -> None:
+        x, y = point
+        doc = self.view.doc
+        widget = next(
+            (w for w in doc.widgets(page)
+             if w["rect"][0] <= x <= w["rect"][2] and w["rect"][1] <= y <= w["rect"][3]),
+            None)
+        if widget is None:
+            return
+        if widget["type"] in ("CheckBox", "RadioButton"):
+            is_on = str(widget["value"]).strip().lower() not in CHECKBOX_OFF_VALUES
+            doc.set_widget_value(page, widget["name"], not is_on)
+        else:
+            text, ok = QInputDialog.getMultiLineText(
+                self, "Compila campo", widget["name"] or "Valore", str(widget["value"] or ""))
+            if not ok:
+                return
+            doc.set_widget_value(page, widget["name"], text)
+        self.view.refresh_after_edit()
+        self._update_title()
+
+    def _clamped_rect(self, page: int, point: tuple, w_pt: float, h_pt: float):
+        doc = self.view.doc
+        page_w, page_h = doc.page_sizes[page]
+        x0 = max(0.0, min(point[0], max(0.0, page_w - w_pt)))
+        y0 = max(0.0, min(point[1], max(0.0, page_h - h_pt)))
+        return (x0, y0, x0 + w_pt, y0 + h_pt)
+
+    def _add_text_at(self, page: int, point: tuple) -> None:
+        text, ok = QInputDialog.getMultiLineText(self, "Aggiungi testo", "Testo:", "")
+        if not ok or not text.strip():
+            return
+        rect = self._clamped_rect(page, point, *ADD_TEXT_SIZE_PT)
+        self.view.doc.add_freetext(page, rect, text)
+        self.view.refresh_after_edit()
+        self._update_title()
+
+    def _add_image_at(self, page: int, point: tuple) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Aggiungi immagine", "",
+            "Immagini (*.png *.jpg *.jpeg *.bmp *.gif)")
+        if not path:
+            return
+        img = QImage(path)
+        if img.isNull():
+            QMessageBox.warning(self, APP_NAME, "Impossibile leggere l'immagine scelta.")
+            return
+        height_pt = ADD_IMAGE_WIDTH_PT * img.height() / img.width()
+        rect = self._clamped_rect(page, point, ADD_IMAGE_WIDTH_PT, height_pt)
+        try:
+            self.view.doc.add_image(page, rect, path)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Impossibile inserire l'immagine:\n{exc}")
+            return
+        self.view.refresh_after_edit()
+        self._update_title()
+
+    # -------------------------------------------------------- gestione pagine
+
+    def _move_page(self, from_index: int, to_index: int) -> None:
+        if self.view.doc is None:
+            return
+        self.view.doc.move_page(from_index, to_index)
+        self._after_structural_edit()
+
+    def _delete_page(self, index: int) -> None:
+        doc = self.view.doc
+        if doc is None:
+            return
+        if doc.page_count <= 1:
+            QMessageBox.warning(self, APP_NAME, "Non puoi eliminare l'unica pagina del documento.")
+            return
+        reply = QMessageBox.question(
+            self, APP_NAME, f"Eliminare la pagina {index + 1}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            doc.delete_page(index)
+        except DocumentError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        self._after_structural_edit()
+
+    def _delete_current_page(self) -> None:
+        if self.view.doc is not None:
+            self._delete_page(self.view.current_page())
+
+    def _after_structural_edit(self) -> None:
+        self.view.reload_structure()
+        self.outline_panel.populate(self.view.doc.outline())
+        self.thumb_panel.populate(self.view.doc)
+        self._update_title()
+
+    # ---------------------------------------------------------------- salva
+
+    def merge_pdf_dialog(self) -> None:
+        if self.view.doc is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Unisci PDF (aggiunge in fondo)", "", "Documenti PDF (*.pdf)")
+        if not path:
+            return
+        try:
+            self.view.doc.insert_pdf(path)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Impossibile unire il PDF:\n{exc}")
+            return
+        self._after_structural_edit()
+        self.statusBar().showMessage("PDF unito in fondo al documento.", 4000)
+
+    def save_document(self) -> None:
+        doc = self.view.doc
+        if doc is None:
+            return
+        try:
+            doc.save()
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Salvataggio non riuscito:\n{exc}")
+            return
+        self._update_title()
+        self.statusBar().showMessage("Documento salvato.", 3000)
+
+    def save_document_as(self) -> None:
+        doc = self.view.doc
+        if doc is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Salva con nome", doc.path, "Documenti PDF (*.pdf)")
+        if not path:
+            return
+        try:
+            doc.save(path)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Salvataggio non riuscito:\n{exc}")
+            return
+        self._update_title()
+        self._add_recent_file(path)
+        self._save_settings()
+        self.statusBar().showMessage(f"Salvato come {path}", 4000)
 
     # ------------------------------------------------------- file recenti
 
@@ -489,6 +726,9 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------ misc
 
     def closeEvent(self, event):
+        if not self._confirm_discard_changes():
+            event.ignore()
+            return
         if self.view.doc is not None:
             self._remember_doc_state(self.view.doc.path)
             self.view.doc.close()

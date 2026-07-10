@@ -1,8 +1,8 @@
 # PDF Tool
 
-Visualizzatore PDF desktop leggero e veloce (stile SumatraPDF), scritto in
-Python con **PyMuPDF** (rendering) e **PySide6** (UI). Fase 1: solo viewer;
-l'editing (annotazioni, firma, form) arriverà in Fase 2 come layer opzionale.
+Visualizzatore ed editor PDF desktop leggero e veloce (stile SumatraPDF per
+la visualizzazione), scritto in Python con **PyMuPDF** (rendering/editing) e
+**PySide6** (UI).
 
 Tre modalità di visualizzazione (`Ctrl+6/7/8`, come SumatraPDF):
 
@@ -28,6 +28,31 @@ Altre funzioni:
   Tool tra le app disponibili e apre le Impostazioni di Windows per
   completare la scelta (richiede la build distribuita, non l'esecuzione da
   sorgente).
+
+## Editing (Fase 2)
+
+Dal menu **Modifica** si attiva uno strumento (resta attivo finché non lo si
+disattiva, per compilare/inserire più elementi di seguito):
+
+- **Compila modulo** (`Ctrl+Shift+F`): i campi rilevati si evidenziano in
+  blu; un clic su un campo testo apre un editor, un clic su una casella la
+  spunta direttamente;
+- **Aggiungi testo** (`Ctrl+Shift+T`): un clic sulla pagina apre un editor
+  di testo, inserito come annotazione;
+- **Aggiungi immagine** (`Ctrl+Shift+I`): un clic sceglie il file immagine e
+  la posiziona (impressa nella pagina, come un timbro).
+
+Dal menu **Documento**:
+
+- **Unisci PDF…** accoda in fondo tutte le pagine di un altro file;
+- **Elimina pagina corrente**, oppure dal **pannello miniature** (`F9`):
+  trascina per riordinare le pagine, clic destro per eliminarle;
+- **Salva** (`Ctrl+S`) / **Salva con nome…** (`Ctrl+Shift+S`).
+
+Le modifiche non salvate sono segnalate con un punto (•) nel titolo della
+finestra; chiudendo un documento modificato viene chiesto se salvare.
+Non c'è ancora annulla/ripristina (undo/redo): per tornare indietro bisogna
+chiudere senza salvare.
 
 ## Avvio
 
@@ -63,6 +88,8 @@ Smoke test senza display: `QT_QPA_PLATFORM=offscreen venv/bin/python tests/smoke
 | `F9`                 | Mostra/nascondi pannello laterale        |
 | `Ctrl+]` / `Ctrl+[`  | Ruota a destra / sinistra                |
 | `Ctrl+P`             | Stampa…                                  |
+| `Ctrl+Shift+F/T/I`   | Strumento: compila modulo / aggiungi testo / aggiungi immagine |
+| `Ctrl+S` / `Ctrl+Shift+S` | Salva / Salva con nome…             |
 
 ## Build portatile per Windows
 
@@ -86,16 +113,17 @@ installazione, avviabile da cartella/chiavetta):
 La build è in modalità *onedir* (cartella) e non *onefile*: il singolo `.exe`
 autoestraente costerebbe secondi a ogni avvio, contro l'obiettivo di velocità.
 
-## Architettura (Fase 1)
+## Architettura
 
 ```
 pdf_tool/
-├── app.py              # finestra principale, barra ricerca, statusbar, scorciatoie
+├── app.py              # finestra principale, menu, dialoghi di editing, statusbar
 ├── __main__.py         # python -m pdf_tool
 └── viewer/
     ├── document.py     # wrapper thread-safe di PyMuPDF (unico punto di contatto)
     ├── render.py       # cache LRU + task di rendering/ricerca su QThreadPool
-    └── view.py         # widget a scroll continuo, painting solo delle pagine visibili
+    ├── view.py         # widget a scroll continuo, painting solo delle pagine visibili
+    └── sidebar.py       # pannello laterale: indice/segnalibri e miniature
 ```
 
 Scelte per la velocità:
@@ -107,5 +135,8 @@ Scelte per la velocità:
   in attesa del render si mostra il render precedente riscalato;
 - nessuna toolbar: UI ridotta a vista + statusbar.
 
-La Fase 2 (annotazioni, firma, form) si aggancerà a `viewer/document.py`
-come modulo separato, caricato solo quando serve.
+`viewer/document.py` è l'unico punto di contatto con MuPDF: il rendering è
+di sola lettura e chiamabile da thread worker, mentre le operazioni di
+editing (form, testo, immagini, unione, riordino pagine, salvataggio) mutano
+il documento in memoria sul thread UI — dopo vanno sempre seguite da un
+refresh della vista (`PdfView.refresh_after_edit()` o `.reload_structure()`).

@@ -38,6 +38,12 @@ BG_COLOR = QColor(70, 74, 78)
 PAGE_BORDER = QColor(40, 40, 40)
 HIGHLIGHT = QColor(255, 210, 0, 110)
 HIGHLIGHT_CURRENT = QColor(255, 120, 0, 150)
+WIDGET_HINT = QColor(60, 140, 220, 70)
+WIDGET_HINT_BORDER = QColor(40, 110, 190)
+
+TOOL_FORM = "form"
+TOOL_ADD_TEXT = "add_text"
+TOOL_ADD_IMAGE = "add_image"
 
 FIT_NONE = 0
 FIT_WIDTH = 1
@@ -60,6 +66,7 @@ class PdfView(QAbstractScrollArea):
     pageChanged = Signal(int, int)      # pagina corrente (1-based), totale
     zoomChanged = Signal(float)         # fattore di zoom corrente
     modeChanged = Signal(str)           # nome della modalità corrente
+    editRequested = Signal(str, int, object)  # tool, pagina, (x_pt, y_pt)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -71,6 +78,8 @@ class PdfView(QAbstractScrollArea):
         self.fit_mode = FIT_WIDTH
         self.mode = MODE_CONTINUOUS
         self.rotation = 0   # 0/90/180/270, in senso orario
+        self.tool: str | None = None    # None o uno dei TOOL_*
+        self._widget_cache: dict[int, list] = {}  # pagina -> widgets() (per hint)
 
         # Raggruppamento pagine -> righe (dipende dalla modalità)
         self._rows: list[list[int]] = []
@@ -117,6 +126,7 @@ class PdfView(QAbstractScrollArea):
         self._fallback.clear()
         self._wanted = set()
         self._pending.clear()
+        self._widget_cache.clear()
         self.clear_search()
         self._last_emitted_page = -1
         self.rotation = 0
@@ -409,6 +419,61 @@ class PdfView(QAbstractScrollArea):
         if row - 1 >= 0:
             self.goto_page(self._rows[row - 1][0])
 
+    # -------------------------------------------------------------- editing
+
+    def set_tool(self, tool: str | None) -> None:
+        """Attiva uno strumento (TOOL_*) o torna alla sola visualizzazione (None)."""
+        self.tool = tool
+        self._widget_cache.clear()
+        self.viewport().setCursor(
+            Qt.CursorShape.CrossCursor if tool else Qt.CursorShape.ArrowCursor)
+        self.viewport().update()
+
+    def refresh_after_edit(self) -> None:
+        """Invalida la cache di rendering dopo un edit che non cambia le pagine."""
+        self._cache.clear()
+        self._fallback.clear()
+        self._pending.clear()
+        self._widget_cache.clear()
+        self.viewport().update()
+
+    def reload_structure(self) -> None:
+        """Ricostruisce righe/layout dopo un edit che cambia numero/ordine pagine."""
+        if self.doc is None:
+            return
+        cur = min(self.current_page(), self.doc.page_count - 1)
+        self.refresh_after_edit()
+        self._build_rows()
+        if self.fit_mode != FIT_NONE:
+            self._apply_fit()
+        else:
+            self._relayout()
+        self.goto_page(cur)
+        self.viewport().update()
+        self._emit_page_changed()
+
+    def _hit_test(self, viewport_pos) -> tuple[int, tuple[float, float]] | None:
+        """Pagina e punto PDF sotto una posizione del viewport, se presenti."""
+        if self.doc is None:
+            return None
+        content_x = viewport_pos.x() + self.horizontalScrollBar().value()
+        content_y = viewport_pos.y() + self.verticalScrollBar().value()
+        for li in range(len(self._laid)):
+            row_x = self._row_x(li)
+            for p in self._rows[self._laid[li]]:
+                _, x_rel, gy, w, h = self._page_geo[p]
+                x, y = row_x + x_rel, gy
+                if x <= content_x < x + w and y <= content_y < y + h:
+                    point = self.doc.to_page_point(
+                        p, content_x - x, content_y - y, self.zoom, self.rotation)
+                    return p, point
+        return None
+
+    def _widgets_for(self, page: int) -> list:
+        if page not in self._widget_cache:
+            self._widget_cache[page] = self.doc.widgets(page) if self.doc else []
+        return self._widget_cache[page]
+
     # -------------------------------------------------------------- ricerca
 
     def set_search_results(self, hits: dict[int, list]) -> None:
@@ -493,6 +558,16 @@ class PdfView(QAbstractScrollArea):
                 painter.setPen(QPen(PAGE_BORDER))
                 painter.drawRect(x, y, w - 1, h - 1)
 
+                # In modalità "compila modulo", evidenzia i campi cliccabili
+                if self.tool == TOOL_FORM:
+                    for widget in self._widgets_for(p):
+                        rx0, ry0, rx1, ry1 = self.doc.to_pixel_rect(
+                            p, widget["rect"], self.zoom, self.rotation)
+                        painter.fillRect(QRectF(x + rx0, y + ry0, rx1 - rx0, ry1 - ry0),
+                                         WIDGET_HINT)
+                        painter.setPen(QPen(WIDGET_HINT_BORDER))
+                        painter.drawRect(QRectF(x + rx0, y + ry0, rx1 - rx0, ry1 - ry0))
+
                 # Evidenziazione risultati di ricerca
                 rects = self._hits.get(p)
                 if rects:
@@ -573,6 +648,17 @@ class PdfView(QAbstractScrollArea):
 
     def scrollContentsBy(self, dx: int, dy: int) -> None:
         self.viewport().update()
+
+    def mousePressEvent(self, event) -> None:
+        if (self.tool is not None and self.doc is not None
+                and event.button() == Qt.MouseButton.LeftButton):
+            hit = self._hit_test(event.position().toPoint())
+            if hit is not None:
+                page, point = hit
+                self.editRequested.emit(self.tool, page, point)
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
     def wheelEvent(self, event) -> None:
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

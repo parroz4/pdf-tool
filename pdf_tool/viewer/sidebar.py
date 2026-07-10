@@ -13,7 +13,7 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
-    QAbstractItemView, QListView, QListWidget, QListWidgetItem,
+    QAbstractItemView, QListView, QListWidget, QListWidgetItem, QMenu,
     QTreeWidget, QTreeWidgetItem,
 )
 
@@ -57,9 +57,17 @@ class OutlinePanel(QTreeWidget):
 
 
 class ThumbnailPanel(QListWidget):
-    """Elenco verticale di miniature, renderizzate in modo lazy."""
+    """Elenco verticale di miniature, renderizzate in modo lazy.
+
+    Le pagine si possono riordinare trascinando le miniature e eliminare dal
+    menu contestuale: non lo fa Qt in autonomia (il drop viene intercettato
+    e tradotto in un segnale) perché il riordino va applicato al PDF vero
+    tramite `Document.move_page`, non solo alla lista visuale.
+    """
 
     pageRequested = Signal(int)
+    pageMoveRequested = Signal(int, int)    # da, a (indici 0-based)
+    pageDeleteRequested = Signal(int)       # indice 0-based
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -74,6 +82,10 @@ class ThumbnailPanel(QListWidget):
             "QListWidget::item { color: #ddd; padding: 4px; }"
             "QListWidget::item:selected { background: #3a6ea5; border-radius: 4px; }"
         )
+        self.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_context_menu)
 
         self.doc = None
         self._scale = 1.0
@@ -88,6 +100,30 @@ class ThumbnailPanel(QListWidget):
 
         self.itemClicked.connect(lambda item: self.pageRequested.emit(self.row(item)))
         self.verticalScrollBar().valueChanged.connect(self._schedule_visible)
+
+    def dropEvent(self, event) -> None:
+        # Non lasciamo che Qt sposti l'item da solo: il riordino vero
+        # avviene sul documento (Document.move_page) e la lista viene
+        # ripopolata da lì, così resta sempre sincronizzata col PDF.
+        if self.doc is None:
+            event.ignore()
+            return
+        source_row = self.currentRow()
+        target_item = self.itemAt(event.position().toPoint())
+        target_row = self.row(target_item) if target_item is not None else self.count() - 1
+        event.ignore()
+        if 0 <= source_row < self.count() and target_row != source_row:
+            self.pageMoveRequested.emit(source_row, target_row)
+
+    def _show_context_menu(self, pos) -> None:
+        item = self.itemAt(pos)
+        if item is None or self.doc is None:
+            return
+        menu = QMenu(self)
+        delete_action = menu.addAction("Elimina pagina")
+        chosen = menu.exec(self.viewport().mapToGlobal(pos))
+        if chosen == delete_action:
+            self.pageDeleteRequested.emit(self.row(item))
 
     # ------------------------------------------------------------ documento
 

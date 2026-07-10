@@ -7,6 +7,7 @@ della prima pagina (cache popolata), ricerca testo, nessuna eccezione.
 """
 
 import os
+import shutil
 import sys
 import tempfile
 
@@ -14,13 +15,29 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QSettings, QTimer  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+import pymupdf  # noqa: E402
+from PySide6.QtCore import QPoint, QSettings, QTimer  # noqa: E402
+from PySide6.QtGui import QColor, QImage  # noqa: E402
+from PySide6.QtWidgets import (  # noqa: E402
+    QApplication, QFileDialog, QInputDialog, QMessageBox,
+)
 
 # Le impostazioni persistenti (file recenti, stato per documento) vanno in
 # una directory temporanea: il test non deve toccare la config reale.
 _settings_dir = tempfile.mkdtemp(prefix="pdftool-test-settings-")
 QSettings.setPath(QSettings.Format.IniFormat, QSettings.Scope.UserScope, _settings_dir)
+
+# QMessageBox.question/critical aprono dialog modali: sotto la piattaforma
+# offscreen il loro comportamento di blocco è inconsistente (a volte
+# ritornano subito, a volte restano in attesa di un click che non arriverà
+# mai). Il test non deve MAI dipendere da un vero dialog modale: qui li
+# si sostituisce con stub che rispondono subito, e si segnala se
+# `critical` viene mai invocato (indicherebbe un errore reale da indagare).
+critical_calls = []
+QMessageBox.question = staticmethod(
+    lambda *a, **k: QMessageBox.StandardButton.Discard)
+QMessageBox.critical = staticmethod(
+    lambda *a, **k: critical_calls.append(a) or QMessageBox.StandardButton.Ok)
 
 from pdf_tool.app import MainWindow  # noqa: E402
 from pdf_tool.viewer.render import make_key  # noqa: E402
@@ -153,6 +170,145 @@ def main():
         else:
             failures.append("file recenti non aggiornato correttamente")
         window2.close()
+
+        # --- Fase 2: editing (testo, immagine, unione, riordino, form) ---
+        # Lavora su una copia: gli edit non devono toccare il PDF di esempio.
+        edit_src = os.path.join(tempfile.mkdtemp(prefix="pdftool-test-edit-"), "edit.pdf")
+        shutil.copy(PDF, edit_src)
+        edit_window = MainWindow(edit_src)
+        edit_window.show()
+        edit_view = edit_window.view
+        if edit_view.doc is None:
+            failures.append("editing: documento di test non aperto")
+        else:
+            initial_pages = edit_view.doc.page_count
+
+            edit_view.doc.add_freetext(0, (50, 50, 250, 90), "Testo di prova")
+            edit_view.refresh_after_edit()
+            if not edit_view.doc.dirty:
+                failures.append("editing: add_freetext non segna il documento come modificato")
+            else:
+                print("OK: editing - testo aggiunto (documento segnato come modificato)")
+
+            img_path = os.path.join(tempfile.mkdtemp(prefix="pdftool-test-img-"), "logo.png")
+            img = QImage(30, 30, QImage.Format.Format_RGB32)
+            img.fill(QColor("blue"))
+            img.save(img_path)
+            edit_view.doc.add_image(0, (260, 50, 300, 90), img_path)
+            edit_view.refresh_after_edit()
+            print("OK: editing - immagine inserita senza eccezioni")
+
+            edit_view.doc.insert_pdf(PDF)
+            edit_window._after_structural_edit()
+            if edit_view.doc.page_count != initial_pages * 2:
+                failures.append(
+                    f"editing: unione PDF, atteso {initial_pages * 2} pagine, "
+                    f"trovate {edit_view.doc.page_count}")
+            else:
+                print(f"OK: editing - unione PDF ({edit_view.doc.page_count} pagine)")
+
+            last = edit_view.doc.page_count - 1
+            edit_window._move_page(last, 0)
+            if edit_view.doc.page_count != initial_pages * 2:
+                failures.append("editing: move_page ha alterato il numero di pagine")
+            else:
+                print("OK: editing - riordino pagine (move_page)")
+
+            # Nota: _delete_page() mostra un QMessageBox.question di conferma
+            # (blocca in headless senza qualcuno che clicchi) - qui si testa
+            # direttamente l'operazione sul documento, che è ciò che quella
+            # dialog richiama dopo la conferma.
+            before_delete = edit_view.doc.page_count
+            edit_view.doc.delete_page(0)
+            edit_window._after_structural_edit()
+            if edit_view.doc.page_count != before_delete - 1:
+                failures.append("editing: delete_page non ha rimosso la pagina")
+            else:
+                print(f"OK: editing - eliminazione pagina ({edit_view.doc.page_count} pagine)")
+
+            # _hit_test: un clic dentro la prima pagina deve risolvere in
+            # (pagina, punto), senza eccezioni
+            edit_view.viewport().repaint()
+            hit = edit_view._hit_test(QPoint(50, 50))
+            if hit is None:
+                failures.append("editing: _hit_test non trova la pagina sotto il cursore")
+            else:
+                print(f"OK: editing - _hit_test risolve in pagina {hit[0]}, punto {hit[1]}")
+
+            saved_pages = edit_view.doc.page_count
+            edit_window.save_document()
+            if edit_view.doc.dirty:
+                failures.append("editing: il documento risulta ancora modificato dopo il salvataggio")
+            else:
+                print("OK: editing - salvataggio (dirty tornato a False)")
+            edit_window.close()  # non dirty: nessuna dialog di conferma
+
+            reopened = MainWindow(edit_src)
+            reopened.show()
+            if reopened.view.doc is None or reopened.view.doc.page_count != saved_pages:
+                failures.append("editing: le modifiche non risultano persistite su disco")
+            else:
+                print(f"OK: editing - modifiche persistite su disco ({saved_pages} pagine)")
+            reopened.close()
+
+        # Compilazione modulo: PDF con un campo testo, generato al volo.
+        # QInputDialog è sostituito con uno stub per evitare un vero popup
+        # modale (bloccante) durante il test automatico.
+        form_doc = pymupdf.open()
+        form_page = form_doc.new_page(width=300, height=300)
+        widget = pymupdf.Widget()
+        widget.field_name = "campo"
+        widget.field_type = pymupdf.PDF_WIDGET_TYPE_TEXT
+        widget.field_type_string = "Text"
+        widget.rect = pymupdf.Rect(50, 50, 200, 80)
+        widget.field_value = ""
+        form_page.add_widget(widget)
+        form_path = os.path.join(tempfile.mkdtemp(prefix="pdftool-test-form-"), "form.pdf")
+        form_doc.save(form_path)
+        form_doc.close()
+
+        form_window = MainWindow(form_path)
+        form_window.show()
+        original_get_text = QInputDialog.getMultiLineText
+        QInputDialog.getMultiLineText = staticmethod(
+            lambda *a, **k: ("Valore compilato", True))
+        try:
+            form_window._fill_form_field_at(0, (100, 60))
+        finally:
+            QInputDialog.getMultiLineText = original_get_text
+        widgets_after = form_window.view.doc.widgets(0)
+        if widgets_after and widgets_after[0]["value"] == "Valore compilato":
+            print("OK: editing - compilazione campo modulo (_fill_form_field_at)")
+        else:
+            failures.append(f"editing: campo modulo non compilato correttamente ({widgets_after})")
+        # Non chiuso volutamente: ha modifiche non salvate e close()
+        # mostrerebbe una vera dialog di conferma (blocca in headless).
+        # app.quit() più sotto termina comunque il loop senza invocare
+        # closeEvent sulle finestre rimaste aperte.
+
+        # _add_image_at: anche qui il file dialog è sostituito con uno stub
+        img2_window = MainWindow(edit_src)
+        img2_window.show()
+        original_get_open = QFileDialog.getOpenFileName
+        QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (img_path, ""))
+        try:
+            img2_window._add_image_at(0, (100, 100))
+        finally:
+            QFileDialog.getOpenFileName = original_get_open
+        if img2_window.view.doc.dirty:
+            print("OK: editing - _add_image_at (dialog stub)")
+        else:
+            failures.append("editing: _add_image_at non ha modificato il documento")
+        img2_window.save_document()
+        img2_window.close()
+
+        if critical_calls:
+            failures.append(
+                f"QMessageBox.critical invocato {len(critical_calls)} volta/e durante il "
+                f"test (probabile errore reale, non solo un dettaglio dell'headless): "
+                f"{[str(c[1:]) for c in critical_calls]}")
+        else:
+            print("OK: nessun errore critico (QMessageBox.critical) durante il test")
 
         app.quit()
 

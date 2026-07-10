@@ -100,11 +100,16 @@ class MainWindow(QMainWindow):
         self.outline_panel.pageRequested.connect(self.view.goto_page)
         self.thumb_panel.pageRequested.connect(self.view.goto_page)
         self.thumb_panel.pageMoveRequested.connect(self._move_page)
-        self.thumb_panel.pageDeleteRequested.connect(self._delete_page)
+        self.thumb_panel.pagesDeleteRequested.connect(self._pages_delete)
+        self.thumb_panel.pagesCopyRequested.connect(self._pages_copy)
+        self.thumb_panel.pagesCutRequested.connect(self._pages_cut)
+        self.thumb_panel.pagesPasteRequested.connect(self._pages_paste)
+        self.thumb_panel.pdfInsertRequested.connect(self._insert_pdf_at)
         self.view.pageChanged.connect(
             lambda cur, tot: self.thumb_panel.set_current_page(cur - 1))
         self.view.editRequested.connect(self._on_edit_requested)
         self.view.documentChanged.connect(self._update_title)
+        self._page_clipboard: bytes | None = None  # copia/taglia pagine (tra sidebar e app)
 
         # Statusbar: modalità, pagina e zoom
         self.mode_label = QLabel(MODE_NAMES[self.view.mode] + "  ")
@@ -247,6 +252,7 @@ class MainWindow(QMainWindow):
         m_doc = bar.addMenu("&Documento")
         self._merge_action = act(m_doc, "&Unisci PDF…", self.merge_pdf_dialog)
         act(m_doc, "Elimina pagina &corrente", self._delete_current_page)
+        act(m_doc, "Incolla pagine in fondo", self._paste_at_end)
         m_doc.addSeparator()
         self._save_action = act(
             m_doc, "&Salva", self.save_document, QKeySequence.StandardKey.Save)
@@ -438,20 +444,21 @@ class MainWindow(QMainWindow):
         self.view.doc.move_page(from_index, to_index)
         self._after_structural_edit()
 
-    def _delete_page(self, index: int) -> None:
+    def _pages_delete(self, indices: list[int]) -> None:
         doc = self.view.doc
-        if doc is None:
+        if doc is None or not indices:
             return
-        if doc.page_count <= 1:
-            QMessageBox.warning(self, APP_NAME, "Non puoi eliminare l'unica pagina del documento.")
+        if doc.page_count - len(set(indices)) < 1:
+            QMessageBox.warning(self, APP_NAME, "Non puoi eliminare tutte le pagine del documento.")
             return
+        label = "la pagina" if len(indices) == 1 else f"le {len(indices)} pagine selezionate"
         reply = QMessageBox.question(
-            self, APP_NAME, f"Eliminare la pagina {index + 1}?",
+            self, APP_NAME, f"Eliminare {label}?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply != QMessageBox.StandardButton.Yes:
             return
         try:
-            doc.delete_page(index)
+            doc.delete_pages(indices)
         except DocumentError as exc:
             QMessageBox.warning(self, APP_NAME, str(exc))
             return
@@ -459,7 +466,61 @@ class MainWindow(QMainWindow):
 
     def _delete_current_page(self) -> None:
         if self.view.doc is not None:
-            self._delete_page(self.view.current_page())
+            self._pages_delete([self.view.current_page()])
+
+    def _pages_copy(self, indices: list[int]) -> None:
+        doc = self.view.doc
+        if doc is None or not indices:
+            return
+        self._page_clipboard = doc.extract_pages_bytes(indices)
+        self.thumb_panel.set_clipboard_available(True)
+        label = "Pagina copiata" if len(indices) == 1 else f"{len(indices)} pagine copiate"
+        self.statusBar().showMessage(f"{label}.", 3000)
+
+    def _pages_cut(self, indices: list[int]) -> None:
+        doc = self.view.doc
+        if doc is None or not indices:
+            return
+        if doc.page_count - len(set(indices)) < 1:
+            QMessageBox.warning(self, APP_NAME, "Non puoi tagliare tutte le pagine del documento.")
+            return
+        self._page_clipboard = doc.extract_pages_bytes(indices)
+        self.thumb_panel.set_clipboard_available(True)
+        try:
+            doc.delete_pages(indices)
+        except DocumentError as exc:
+            QMessageBox.warning(self, APP_NAME, str(exc))
+            return
+        self._after_structural_edit()
+        label = "Pagina tagliata" if len(indices) == 1 else f"{len(indices)} pagine tagliate"
+        self.statusBar().showMessage(f"{label}.", 3000)
+
+    def _pages_paste(self, at_index: int) -> None:
+        doc = self.view.doc
+        if doc is None or self._page_clipboard is None:
+            return
+        doc.insert_pdf_bytes(self._page_clipboard, at_index=at_index)
+        self._after_structural_edit()
+        self.statusBar().showMessage("Pagine incollate.", 3000)
+
+    def _paste_at_end(self) -> None:
+        if self.view.doc is not None:
+            self._pages_paste(self.view.doc.page_count)
+
+    def _insert_pdf_at(self, at_index: int) -> None:
+        if self.view.doc is None:
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Inserisci PDF qui", "", "Documenti PDF (*.pdf)")
+        if not path:
+            return
+        try:
+            self.view.doc.insert_pdf(path, at_index=at_index)
+        except Exception as exc:
+            QMessageBox.critical(self, APP_NAME, f"Impossibile inserire il PDF:\n{exc}")
+            return
+        self._after_structural_edit()
+        self.statusBar().showMessage("PDF inserito.", 3000)
 
     def _after_structural_edit(self) -> None:
         self.view.reload_structure()

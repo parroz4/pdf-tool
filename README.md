@@ -31,28 +31,53 @@ Altre funzioni:
 
 ## Editing (Fase 2)
 
-Dal menu **Modifica** si attiva uno strumento (resta attivo finché non lo si
-disattiva, per compilare/inserire più elementi di seguito):
+Una **toolbar sempre visibile** (sotto la barra dei menu) dà accesso rapido
+alle azioni di editing più usate; le stesse azioni sono anche nei menu
+**Modifica** e **Documento**, con le scorciatoie.
+
+Strumenti (in Modifica; restano attivi finché non li disattivi, per
+compilare/inserire più elementi di seguito):
 
 - **Compila modulo** (`Ctrl+Shift+F`): i campi rilevati si evidenziano in
   blu; un clic su un campo testo apre un editor, un clic su una casella la
   spunta direttamente;
 - **Aggiungi testo** (`Ctrl+Shift+T`): un clic sulla pagina apre un editor
-  di testo, inserito come annotazione;
+  **direttamente sopra il testo** (niente popup) — si scrive lì, si conferma
+  perdendo il focus o con `Ctrl+Invio`, si annulla con `Esc`;
 - **Aggiungi immagine** (`Ctrl+Shift+I`): un clic sceglie il file immagine e
-  la posiziona (impressa nella pagina, come un timbro).
+  la posiziona; resta **trascinabile** finché non la confermi (clic altrove,
+  cambio strumento o salvataggio), poi viene impressa in modo permanente.
+
+**Testo sempre spostabile**: senza nessuno strumento attivo, un clic su
+un'annotazione di testo già inserita la rende trascinabile — non serve
+riattivare "Aggiungi testo". (Le immagini invece, una volta impresse, non
+sono più spostabili: il formato PDF non ha un vero equivalente di
+"annotazione immagine" movibile come per il testo.)
+
+**Annulla/Ripristina** (`Ctrl+Z` / `Ctrl+Y`): copre tutte le modifiche —
+testo, immagini, campi modulo, pagine.
 
 Dal menu **Documento**:
 
 - **Unisci PDF…** accoda in fondo tutte le pagine di un altro file;
-- **Elimina pagina corrente**, oppure dal **pannello miniature** (`F9`):
-  trascina per riordinare le pagine, clic destro per eliminarle;
+- **Elimina pagina corrente**;
 - **Salva** (`Ctrl+S`) / **Salva con nome…** (`Ctrl+Shift+S`).
 
+Il **pannello miniature** (`F9`) è anche un organizzatore di pagine:
+
+- **trascina** una miniatura per riordinare le pagine;
+- **Ctrl/Maiusc+clic** per selezionarne più di una;
+- dal **menu contestuale** (clic destro) o da tastiera: **copia**
+  (`Ctrl+C`), **taglia** (`Ctrl+X`), **incolla qui** (`Ctrl+V`, prima della
+  miniatura scelta), **elimina** (`Canc`) — funzionano anche su più pagine
+  selezionate insieme, e si può incollare pagine copiate da un documento in
+  un altro aperto in un'altra finestra;
+- **Inserisci PDF qui…** dal menu contestuale inserisce un altro file PDF
+  esattamente tra due pagine, non solo in fondo.
+
 Le modifiche non salvate sono segnalate con un punto (•) nel titolo della
-finestra; chiudendo un documento modificato viene chiesto se salvare.
-Non c'è ancora annulla/ripristina (undo/redo): per tornare indietro bisogna
-chiudere senza salvare.
+finestra; chiudendo un documento modificato (o aprendone un altro) viene
+chiesto se salvare.
 
 ## Avvio
 
@@ -89,7 +114,11 @@ Smoke test senza display: `QT_QPA_PLATFORM=offscreen venv/bin/python tests/smoke
 | `Ctrl+]` / `Ctrl+[`  | Ruota a destra / sinistra                |
 | `Ctrl+P`             | Stampa…                                  |
 | `Ctrl+Shift+F/T/I`   | Strumento: compila modulo / aggiungi testo / aggiungi immagine |
+| `Ctrl+Z` / `Ctrl+Y`  | Annulla / Ripristina                     |
 | `Ctrl+S` / `Ctrl+Shift+S` | Salva / Salva con nome…             |
+
+Nel pannello miniature: `Ctrl/Maiusc+clic` seleziona più pagine,
+`Ctrl+C`/`Ctrl+X`/`Ctrl+V` copia/taglia/incolla, `Canc` elimina.
 
 ## Build portatile per Windows
 

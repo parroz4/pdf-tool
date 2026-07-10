@@ -409,6 +409,67 @@ def main():
                         print(f"OK: editing - annotazione di testo spostata "
                               f"({annot['rect']} -> {moved_rect})")
 
+        # Organizzatore pagine: multiselezione, copia/taglia/incolla,
+        # inserimento di un PDF tra due pagine specifiche.
+        img2_window.sidebar_dock.show()
+        img2_window.thumb_panel.populate(img2_window.view.doc)
+        img2_window.thumb_panel.setCurrentRow(0)
+        img2_window.thumb_panel.item(2).setSelected(True)
+        img2_window.thumb_panel.item(0).setSelected(True)
+        selected = img2_window.thumb_panel.selected_rows()
+        if selected != [0, 2]:
+            failures.append(f"editing: selezione multipla miniature, atteso [0,2], trovato {selected}")
+        else:
+            print("OK: editing - multiselezione miniature (Ctrl/Maiusc+clic)")
+
+        pages_before_copy = img2_window.view.doc.page_count
+        img2_window._pages_copy(selected)
+        if img2_window._page_clipboard is None or not img2_window.thumb_panel._clipboard_available:
+            failures.append("editing: copia pagine non ha popolato la clipboard")
+        else:
+            print(f"OK: editing - copia {len(selected)} pagine negli appunti")
+
+        img2_window._pages_paste(1)
+        if img2_window.view.doc.page_count != pages_before_copy + len(selected):
+            failures.append(
+                f"editing: incolla pagine, atteso {pages_before_copy + len(selected)} pagine, "
+                f"trovate {img2_window.view.doc.page_count}")
+        else:
+            print(f"OK: editing - incolla pagine ({img2_window.view.doc.page_count} pagine)")
+
+        pages_before_cut = img2_window.view.doc.page_count
+        img2_window._pages_cut([0])
+        if img2_window.view.doc.page_count != pages_before_cut - 1:
+            failures.append("editing: taglia pagine non ha rimosso la pagina")
+        elif img2_window._page_clipboard is None:
+            failures.append("editing: taglia pagine non ha aggiornato la clipboard")
+        else:
+            print(f"OK: editing - taglia pagina ({img2_window.view.doc.page_count} pagine)")
+
+        # Inserimento PDF tra due pagine: un PDF sorgente con una pagina di
+        # dimensione distintiva (landscape) per verificare che finisca
+        # davvero nella posizione richiesta, non in fondo.
+        marker_doc = pymupdf.open()
+        marker_doc.new_page(width=999, height=333)
+        marker_path = os.path.join(tempfile.mkdtemp(prefix="pdftool-test-marker-"), "marker.pdf")
+        marker_doc.save(marker_path)
+        marker_doc.close()
+
+        insert_at = 2
+        original_get_open2 = QFileDialog.getOpenFileName
+        QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (marker_path, ""))
+        try:
+            img2_window._insert_pdf_at(insert_at)
+        finally:
+            QFileDialog.getOpenFileName = original_get_open2
+        inserted_size = img2_window.view.doc.page_sizes[insert_at]
+        if inserted_size != (999.0, 333.0):
+            failures.append(
+                f"editing: inserimento PDF alla posizione {insert_at}, "
+                f"trovata dimensione {inserted_size} invece di (999.0, 333.0)")
+        else:
+            print(f"OK: editing - PDF inserito esattamente alla posizione {insert_at}")
+
         img2_window.save_document()
         img2_window.close()
 

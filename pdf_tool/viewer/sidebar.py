@@ -11,7 +11,7 @@ risoluzione.
 from __future__ import annotations
 
 from PySide6.QtCore import QSize, Qt, QThreadPool, QTimer, Signal
-from PySide6.QtGui import QIcon, QPainter, QPixmap
+from PySide6.QtGui import QIcon, QKeySequence, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView, QListView, QListWidget, QListWidgetItem, QMenu,
     QTreeWidget, QTreeWidgetItem,
@@ -59,15 +59,21 @@ class OutlinePanel(QTreeWidget):
 class ThumbnailPanel(QListWidget):
     """Elenco verticale di miniature, renderizzate in modo lazy.
 
-    Le pagine si possono riordinare trascinando le miniature e eliminare dal
-    menu contestuale: non lo fa Qt in autonomia (il drop viene intercettato
-    e tradotto in un segnale) perché il riordino va applicato al PDF vero
-    tramite `Document.move_page`, non solo alla lista visuale.
+    Le pagine si possono riordinare trascinandole una alla volta (il drop
+    viene intercettato e tradotto in un segnale, non lasciato a Qt: il
+    riordino va applicato al PDF vero tramite `Document.move_page`, non
+    solo alla lista visuale) e selezionare più alla volta (Ctrl/Maiusc+clic)
+    per copiarle, tagliarle o eliminarle in blocco dal menu contestuale o
+    da tastiera (Ctrl+C/X/V, Canc).
     """
 
     pageRequested = Signal(int)
-    pageMoveRequested = Signal(int, int)    # da, a (indici 0-based)
-    pageDeleteRequested = Signal(int)       # indice 0-based
+    pageMoveRequested = Signal(int, int)      # da, a (indici 0-based)
+    pagesDeleteRequested = Signal(list)       # indici 0-based
+    pagesCopyRequested = Signal(list)         # indici 0-based
+    pagesCutRequested = Signal(list)          # indici 0-based
+    pagesPasteRequested = Signal(int)         # indice 0-based prima del quale incollare
+    pdfInsertRequested = Signal(int)          # indice 0-based prima del quale inserire
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -75,7 +81,7 @@ class ThumbnailPanel(QListWidget):
         self.setFlow(QListView.Flow.TopToBottom)
         self.setWrapping(False)
         self.setMovement(QListView.Movement.Static)
-        self.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.setSelectionMode(QListWidget.SelectionMode.ExtendedSelection)
         self.setSpacing(8)
         self.setStyleSheet(
             "QListWidget { background: #46474e; border: none; }"
@@ -90,6 +96,7 @@ class ThumbnailPanel(QListWidget):
         self.doc = None
         self._scale = 1.0
         self._thumb_h = THUMB_W
+        self._clipboard_available = False
 
         self._pool = QThreadPool(self)
         self._pool.setMaxThreadCount(1)
@@ -101,10 +108,17 @@ class ThumbnailPanel(QListWidget):
         self.itemClicked.connect(lambda item: self.pageRequested.emit(self.row(item)))
         self.verticalScrollBar().valueChanged.connect(self._schedule_visible)
 
+    def selected_rows(self) -> list[int]:
+        return sorted(self.row(item) for item in self.selectedItems())
+
+    def set_clipboard_available(self, available: bool) -> None:
+        self._clipboard_available = available
+
     def dropEvent(self, event) -> None:
         # Non lasciamo che Qt sposti l'item da solo: il riordino vero
         # avviene sul documento (Document.move_page) e la lista viene
         # ripopolata da lì, così resta sempre sincronizzata col PDF.
+        # Sposta una pagina alla volta: quella su cui è partito il drag.
         if self.doc is None:
             event.ignore()
             return
@@ -115,15 +129,52 @@ class ThumbnailPanel(QListWidget):
         if 0 <= source_row < self.count() and target_row != source_row:
             self.pageMoveRequested.emit(source_row, target_row)
 
+    def keyPressEvent(self, event) -> None:
+        if self.doc is not None and event.matches(QKeySequence.StandardKey.Copy):
+            self.pagesCopyRequested.emit(self.selected_rows())
+        elif self.doc is not None and event.matches(QKeySequence.StandardKey.Cut):
+            self.pagesCutRequested.emit(self.selected_rows())
+        elif self.doc is not None and event.matches(QKeySequence.StandardKey.Paste):
+            row = self.currentRow()
+            self.pagesPasteRequested.emit(row if row >= 0 else self.count())
+        elif self.doc is not None and event.key() == Qt.Key.Key_Delete:
+            self.pagesDeleteRequested.emit(self.selected_rows())
+        else:
+            super().keyPressEvent(event)
+
     def _show_context_menu(self, pos) -> None:
-        item = self.itemAt(pos)
-        if item is None or self.doc is None:
+        if self.doc is None:
             return
+        item = self.itemAt(pos)
+        selected = self.selected_rows()
         menu = QMenu(self)
-        delete_action = menu.addAction("Elimina pagina")
+        copy_action = cut_action = delete_action = None
+        if selected:
+            label = "pagina" if len(selected) == 1 else f"{len(selected)} pagine"
+            copy_action = menu.addAction(f"Copia {label}")
+            cut_action = menu.addAction(f"Taglia {label}")
+            delete_action = menu.addAction(f"Elimina {label}")
+            menu.addSeparator()
+        paste_action = insert_action = None
+        if item is not None:
+            paste_action = menu.addAction("Incolla qui")
+            paste_action.setEnabled(self._clipboard_available)
+            insert_action = menu.addAction("Inserisci PDF qui…")
+        if menu.isEmpty():
+            return
         chosen = menu.exec(self.viewport().mapToGlobal(pos))
-        if chosen == delete_action:
-            self.pageDeleteRequested.emit(self.row(item))
+        if chosen is None:
+            return
+        if chosen == copy_action:
+            self.pagesCopyRequested.emit(selected)
+        elif chosen == cut_action:
+            self.pagesCutRequested.emit(selected)
+        elif chosen == delete_action:
+            self.pagesDeleteRequested.emit(selected)
+        elif chosen == paste_action:
+            self.pagesPasteRequested.emit(self.row(item))
+        elif chosen == insert_action:
+            self.pdfInsertRequested.emit(self.row(item))
 
     # ------------------------------------------------------------ documento
 
@@ -151,7 +202,11 @@ class ThumbnailPanel(QListWidget):
         QTimer.singleShot(0, self._schedule_visible)
 
     def set_current_page(self, index: int) -> None:
-        if 0 <= index < self.count() and self.currentRow() != index:
+        if not (0 <= index < self.count()):
+            return
+        if len(self.selectedItems()) > 1:
+            return  # non disturbare una multiselezione in corso (copia/taglia)
+        if self.currentRow() != index:
             self.setCurrentRow(index)
             self.scrollToItem(self.item(index), QAbstractItemView.ScrollHint.EnsureVisible)
 

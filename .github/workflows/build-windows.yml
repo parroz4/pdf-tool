@@ -1,0 +1,35 @@
+name: Build Windows portable
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pyinstaller
+
+      - name: Build portable app
+        run: pyinstaller packaging/pdf_tool_win.spec --noconfirm
+
+      - name: Smoke test (open test PDF offscreen)
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          Start-Process -FilePath "dist/PDFTool/PDFTool.exe" -ArgumentList "examples/test.pdf" -PassThru | Tee-Object -Variable proc
+          Start-Sleep -Seconds 8
+          if ($proc.HasExited -and $proc.ExitCode -ne 0) { exit 1 }
+          Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PDFTool-windows-portable
+          path: dist/PDFTool/

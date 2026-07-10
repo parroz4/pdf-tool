@@ -14,12 +14,14 @@ import sys
 from PySide6.QtCore import Qt, QThreadPool
 from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
-    QApplication, QFileDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QMainWindow, QMessageBox, QToolButton, QVBoxLayout, QWidget,
+    QApplication, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
+    QLineEdit, QMainWindow, QMessageBox, QTabWidget, QToolButton, QVBoxLayout,
+    QWidget,
 )
 
 from .viewer.document import DocumentError
 from .viewer.render import SearchSignals, SearchTask
+from .viewer.sidebar import OutlinePanel, ThumbnailPanel
 from .viewer.view import (
     MODE_BOOK, MODE_CONTINUOUS, MODE_NAMES, MODE_SINGLE, PdfView,
 )
@@ -66,6 +68,24 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.search_bar)
         layout.addWidget(self.view, 1)
         self.setCentralWidget(central)
+
+        # Pannello laterale: indice/segnalibri e miniature (nascosto di default)
+        self.outline_panel = OutlinePanel(self)
+        self.thumb_panel = ThumbnailPanel(self)
+        sidebar_tabs = QTabWidget(self)
+        sidebar_tabs.addTab(self.outline_panel, "Indice")
+        sidebar_tabs.addTab(self.thumb_panel, "Miniature")
+        self.sidebar_dock = QDockWidget("Pannello", self)
+        self.sidebar_dock.setWidget(sidebar_tabs)
+        self.sidebar_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.sidebar_dock)
+        self.sidebar_dock.hide()
+        self.outline_panel.pageRequested.connect(self.view.goto_page)
+        self.thumb_panel.pageRequested.connect(self.view.goto_page)
+        self.view.pageChanged.connect(
+            lambda cur, tot: self.thumb_panel.set_current_page(cur - 1))
 
         # Statusbar: modalità, pagina e zoom
         self.mode_label = QLabel(MODE_NAMES[self.view.mode] + "  ")
@@ -137,6 +157,14 @@ class MainWindow(QMainWindow):
         act(m_view, "Zoom &100%", lambda: self.view.set_zoom(1.0), "Ctrl+1")
         act(m_view, "Adatta &larghezza", self.view.fit_width, "Ctrl+2")
         act(m_view, "Adatta &pagina", self.view.fit_page, "Ctrl+0")
+        m_view.addSeparator()
+        sidebar_action = QAction("&Pannello laterale (indice/miniature)", self)
+        sidebar_action.setCheckable(True)
+        sidebar_action.setShortcut(QKeySequence("F9"))
+        sidebar_action.setShortcutContext(Qt.ShortcutContext.WindowShortcut)
+        sidebar_action.toggled.connect(self.sidebar_dock.setVisible)
+        self.sidebar_dock.visibilityChanged.connect(sidebar_action.setChecked)
+        m_view.addAction(sidebar_action)
 
         m_go = bar.addMenu("V&ai")
         act(m_go, "Pagina &successiva", self.view.next_page)
@@ -187,6 +215,8 @@ class MainWindow(QMainWindow):
         self.hide_search()
         self.setWindowTitle(f"{os.path.basename(path)} — {APP_NAME}")
         self.statusBar().showMessage(path)
+        self.outline_panel.populate(self.view.doc.outline())
+        self.thumb_panel.populate(self.view.doc)
         self.view.setFocus()
 
     # ----------------------------------------------------------- drag & drop

@@ -87,6 +87,18 @@ class Document:
                 results[i] = rects
         return results
 
+    # ----------------------------------------------------------------- indice
+
+    def outline(self) -> list[tuple[int, str, int]]:
+        """Indice/segnalibri: lista di (livello, titolo, pagina 0-based).
+
+        pagina è -1 se la voce non punta a una pagina valida.
+        """
+        with self._lock:
+            toc = self._doc.get_toc(simple=True)
+        return [(level, title, (page - 1) if page and page > 0 else -1)
+                for level, title, page in toc]
+
     # ------------------------------------------------------------------ misc
 
     def close(self):

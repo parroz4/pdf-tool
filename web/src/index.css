@@ -1,0 +1,128 @@
+@import 'tailwindcss';
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  font-family:
+    system-ui,
+    -apple-system,
+    'Segoe UI',
+    Roboto,
+    sans-serif;
+  font-size: 13px;
+}
+
+.viewer,
+.thumbs {
+  scrollbar-gutter: stable;
+  overflow-anchor: none;
+}
+
+/* Livello testo di pdf.js (solo le regole necessarie alla selezione). */
+.page {
+  --scale-round-x: 1px;
+  --scale-round-y: 1px;
+}
+
+.textLayer {
+  color-scheme: only light;
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  letter-spacing: normal;
+  word-spacing: normal;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 0;
+  --min-font-size: 1;
+  --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+  --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+
+.textLayer[data-main-rotation='90'] {
+  transform: rotate(90deg) translateY(-100%);
+}
+.textLayer[data-main-rotation='180'] {
+  transform: rotate(180deg) translate(-100%, -100%);
+}
+.textLayer[data-main-rotation='270'] {
+  transform: rotate(270deg) translateX(-100%);
+}
+
+.textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+}
+
+.textLayer > :not(.markedContent),
+.textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+  --font-height: 0;
+  font-size: calc(var(--text-scale-factor) * var(--font-height));
+  --scale-x: 1;
+  --rotate: 0deg;
+  transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+
+.textLayer .markedContent {
+  display: contents;
+}
+
+.textLayer ::selection {
+  background: rgb(0 100 255 / 0.25);
+  color: transparent;
+}
+
+.textLayer br::selection {
+  background: transparent;
+}
+
+.textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  user-select: none;
+}
+
+/* Editor: contorno e maniglie hanno spessore costante a ogni zoom. */
+.annot-selected {
+  outline: calc(1.5px / var(--s)) solid #2563eb;
+  outline-offset: calc(2px / var(--s));
+}
+
+.annot-handle {
+  position: absolute;
+  width: calc(10px / var(--s));
+  height: calc(10px / var(--s));
+  margin: calc(-5px / var(--s));
+  background: #fff;
+  border: calc(1.5px / var(--s)) solid #2563eb;
+  border-radius: 50%;
+  pointer-events: auto;
+  touch-action: none;
+}
+
+.annot-text {
+  white-space: pre;
+  font-family: Helvetica, Arial, 'Liberation Sans', sans-serif;
+  line-height: 1.2;
+  min-width: 0.5em;
+  min-height: 1.2em;
+}

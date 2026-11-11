@@ -4,6 +4,22 @@ Visualizzatore ed editor PDF desktop leggero e veloce (stile SumatraPDF per
 la visualizzazione), scritto in Python con **PyMuPDF** (rendering/editing) e
 **PySide6** (UI).
 
+> **Versione web (novità).** Nella cartella [`web/`](web/) c'è un secondo
+> programma, indipendente da questo: un visualizzatore/editor PDF che gira
+> interamente nel browser, senza backend (Vite + React + TypeScript, pdf.js,
+> pdf-lib). Istruzioni, funzioni e stato delle verifiche sono in
+> [`web/README.md`](web/README.md). In breve:
+>
+> ```bash
+> cd web
+> npm install
+> npm run dev      # sviluppo
+> npm run build    # build di produzione in web/dist
+> ```
+>
+> Il resto di questo README descrive l'app desktop in Python, che non è stata
+> modificata.
+
 Tre modalità di visualizzazione (`Ctrl+6/7/8`, come SumatraPDF):
 
 - **Pagina singola**: una pagina alla volta; `←`/`→` o `PgUp`/`PgDown` per

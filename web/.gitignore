@@ -4,3 +4,4 @@ public/pdfjs/
 public/tesseract/
 tests/out/
 *.tsbuildinfo
+release/

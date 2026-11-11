@@ -20,6 +20,21 @@ npm run preview  # serve la build di produzione
 `web/dist` è un sito statico: si può pubblicare su qualunque hosting di file
 statici (i percorsi sono relativi, quindi funziona anche in una sottocartella).
 
+## App desktop per Windows
+
+La stessa app si può usare senza browser, come programma installabile
+(Electron): finestra propria, collegamento nel menu Start, apertura dei PDF
+con doppio clic o *Apri con*.
+
+```bash
+npm run desktop    # build + avvio dell'app desktop, senza installare
+npm run dist:win   # crea l'installer in web/release/PDF-Tool-Setup-<versione>.exe
+```
+
+L'installer non è firmato: al primo avvio Windows SmartScreen può mostrare un
+avviso. I PDF protetti da password non si aprono nell'app desktop (manca la
+finestra di richiesta della password).
+
 ## Funzioni
 
 **Viewer**

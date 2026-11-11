@@ -6,6 +6,7 @@ import {
   mergeFiles,
   PDF_ACCEPT,
   pickFiles,
+  runOcr,
 } from '../state/actions';
 import {
   checkpoint,
@@ -325,6 +326,18 @@ export function Toolbar() {
               testid="tool-image"
               onClick={() => void pickFiles(IMAGE_ACCEPT, true).then((f) => handleFiles(f))}
             />
+            <button
+              type="button"
+              data-testid="ocr"
+              disabled={busy}
+              title="OCR: riconosce il testo della pagina corrente (Maiusc+clic: tutte le pagine)"
+              aria-label="OCR: riconosci il testo"
+              className={btn}
+              onClick={(e) => void runOcr(e.shiftKey)}
+            >
+              <Icon name="ocr" />
+              <span className="pr-1">OCR</span>
+            </button>
             {sep}
             <Btn icon="undo" title="Annulla (Ctrl+Z)" disabled={!canUndo} testid="undo" onClick={undo} />
             <Btn icon="redo" title="Ripristina (Ctrl+Y)" disabled={!canRedo} testid="redo" onClick={redo} />

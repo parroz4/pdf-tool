@@ -1,5 +1,6 @@
 // Modifica del testo già presente nella pagina (chunk lazy): un doppio clic su
-// una riga di testo la trasforma in una casella modificabile. L'originale non
+// una riga di testo la trasforma in una casella modificabile. Vale sia per il
+// testo vero del PDF sia per quello riconosciuto dall'OCR. L'originale non
 // viene tolto dal contenuto del PDF: è coperto da un rettangolo del colore di
 // fondo e la casella ci viene disegnata sopra, anche nel file esportato.
 import { Util } from 'pdfjs-dist';
@@ -18,18 +19,29 @@ import {
 
 /** Come in export.ts: distanza della linea di base dal bordo alto, in em. */
 const BASELINE = 0.9465;
+/** Altezza delle maiuscole di Helvetica, in em. */
+const CAP_HEIGHT = 0.72;
 
-interface Run {
-  text: string;
-  /** Punto sulla linea di base, in punti pagina (origine in alto a sinistra). */
+interface Box {
   x: number;
   y: number;
   w: number;
-  size: number;
-  angle: number;
+  h: number;
 }
 
-async function textRuns(src: Source, index: number): Promise<Run[]> {
+export interface Run {
+  text: string;
+  /** Inizio della linea di base, in punti pagina (origine in alto a sinistra). */
+  x: number;
+  base: number;
+  size: number;
+  angle: number;
+  /** Area occupata dal testo: serve per il clic e per coprire l'originale. */
+  box: Box;
+}
+
+/** Il testo vero della pagina (non quello dell'OCR). */
+export async function pdfTextRuns(src: Source, index: number): Promise<Run[]> {
   const page = await getPage(src, index);
   const viewport = page.getViewport({ scale: 1 });
   const content = await page.getTextContent();
@@ -42,21 +54,31 @@ async function textRuns(src: Source, index: number): Promise<Run[]> {
     runs.push({
       text: item.str,
       x: m[4],
-      y: m[5],
-      w: item.width,
+      base: m[5],
       size,
       angle: Math.atan2(m[1], m[0]),
+      // fino ai discendenti e non oltre: sotto c'è spesso la riga di un modulo
+      box: { x: m[4] - 1, y: m[5] - size * 0.9, w: item.width + 2, h: size * 1.12 },
     });
   }
   return runs;
 }
 
+function ocrTextRuns(page: PageRef): Run[] {
+  const runs = getState().ocr[`${page.srcId}:${page.index}`] ?? [];
+  return runs.map((r) => ({
+    text: r.text,
+    x: r.x,
+    base: r.base,
+    // l'altezza sopra la linea di base è quella di maiuscole e ascendenti
+    size: Math.max(4, (r.base - r.y) / CAP_HEIGHT),
+    angle: 0,
+    box: { x: r.x - 1, y: r.y - 1, w: r.w + 2, h: r.h + 2 },
+  }));
+}
+
 /** Colore di fondo attorno al riquadro: mediana dei pixel lungo il bordo. */
-function backgroundAt(
-  src: Source,
-  page: PageRef,
-  box: { x: number; y: number; w: number; h: number },
-): string {
+function backgroundAt(src: Source, page: PageRef, box: Box): string {
   try {
     const cached = getCached(src, page.index);
     if (!cached) return '#ffffff';
@@ -96,6 +118,9 @@ function backgroundAt(
   }
 }
 
+const inside = (b: Box, x: number, y: number): boolean =>
+  x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+
 /**
  * Doppio clic nel punto (x, y) della pagina, in punti. Se lì c'è del testo
  * stampato lo trasforma in una casella modificabile e restituisce true.
@@ -103,13 +128,7 @@ function backgroundAt(
 export async function editTextAt(page: PageRef, src: Source, x: number, y: number): Promise<boolean> {
   // Testo già trasformato in casella: si riapre quella.
   const existing = (getState().annots[page.id] ?? []).find(
-    (a) =>
-      a.type === 'text' &&
-      a.cover &&
-      x >= a.cover.x &&
-      x <= a.cover.x + a.cover.w &&
-      y >= a.cover.y &&
-      y <= a.cover.y + a.cover.h,
+    (a) => a.type === 'text' && a.cover && inside(a.cover, x, y),
   );
   if (existing) {
     setState({
@@ -121,33 +140,23 @@ export async function editTextAt(page: PageRef, src: Source, x: number, y: numbe
     return true;
   }
 
-  const runs = await textRuns(src, page.index);
-  const hit = runs.find(
-    (r) =>
-      x >= r.x - 1 && x <= r.x + r.w + 1 && y >= r.y - r.size * 0.9 && y <= r.y + r.size * 0.3,
-  );
+  const runs = [...(await pdfTextRuns(src, page.index)), ...ocrTextRuns(page)];
+  const hit = runs.find((r) => inside(r.box, x, y));
   if (!hit) return false;
   if (Math.abs(hit.angle) > 0.02) {
     toast('Il testo ruotato non si può ancora modificare direttamente.');
     return false;
   }
 
-  const cover = {
-    x: hit.x - 1,
-    y: hit.y - hit.size * 0.9,
-    w: hit.w + 2,
-    // fino ai discendenti e non oltre: sotto c'è spesso la riga di un modulo
-    h: hit.size * 1.12,
-  };
   const a: TextAnnot = {
     id: uid('n'),
     type: 'text',
     x: hit.x,
-    y: hit.y - hit.size * BASELINE,
+    y: hit.base - hit.size * BASELINE,
     text: hit.text,
     size: Math.round(hit.size * 10) / 10,
     color: '#000000',
-    cover: { ...cover, color: backgroundAt(src, page, cover) },
+    cover: { ...hit.box, color: backgroundAt(src, page, hit.box) },
   };
   window.getSelection()?.removeAllRanges();
   checkpoint();

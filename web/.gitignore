@@ -1,5 +1,6 @@
 node_modules/
 dist/
 public/pdfjs/
+public/tesseract/
 tests/out/
 *.tsbuildinfo

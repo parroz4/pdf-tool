@@ -3,7 +3,7 @@
 // dinamico: non entra nel bundle iniziale del viewer.
 import { dropSourceFromCache, openPdf, PasswordCancelled } from '../pdf/pdfjs';
 import { viewerApi } from '../viewer/api';
-import { cancelSearch } from '../viewer/search';
+import { cancelSearch, runSearch } from '../viewer/search';
 import {
   checkpoint,
   getState,
@@ -208,6 +208,35 @@ export function pickFiles(accept: string, multiple: boolean): Promise<File[]> {
 
 export const PDF_ACCEPT = 'application/pdf,.pdf';
 export const IMAGE_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml';
+
+/** Riconosce il testo (OCR) della pagina corrente o di tutte le pagine. */
+export async function runOcr(all: boolean): Promise<void> {
+  const s = getState();
+  if (s.pages.length === 0 || s.busy) return;
+  const pages = all ? s.pages : s.pages.slice(s.currentPage, s.currentPage + 1);
+  const todo = pages.filter((p) => !s.ocr[`${p.srcId}:${p.index}`]);
+  if (todo.length === 0) {
+    toast(all ? 'Il testo di queste pagine è già stato riconosciuto.' : 'Il testo di questa pagina è già stato riconosciuto.');
+    return;
+  }
+  setState({ busy: 'OCR: preparazione…' });
+  try {
+    const { ocrPages } = await import('../editor/ocr');
+    const found = await ocrPages(todo, (busy) => setState({ busy }));
+    const query = getState().search.query;
+    cancelSearch(); // il testo in cache non comprende quello appena riconosciuto
+    if (query) void runSearch(query);
+    toast(
+      found > 0
+        ? 'Testo riconosciuto: ora puoi selezionarlo, cercarlo e modificarlo con un doppio clic.'
+        : 'L’OCR non ha trovato testo in questa pagina.',
+    );
+  } catch (e) {
+    toast(`OCR non riuscito: ${describeError(e)}`, 'error');
+  } finally {
+    setState({ busy: null });
+  }
+}
 
 export async function exportPdf(): Promise<void> {
   const s = getState();

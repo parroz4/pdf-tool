@@ -11,6 +11,8 @@ interface TextRun {
   tx: number[];
   width: number;
   height: number;
+  /** Testo dell'OCR: riquadro già in coordinate viewport [x, y, w, h]. */
+  box?: [number, number, number, number];
 }
 interface PageText {
   text: string;
@@ -44,6 +46,11 @@ function loadPageText(src: Source, index: number): Promise<PageText> {
         }
         if (item.hasEOL) text += ' ';
       }
+      for (const r of getState().ocr[k] ?? []) {
+        text += ' ';
+        runs.push({ start: text.length, str: r.text, tx: [], width: r.w, height: r.h, box: [r.x, r.y, r.w, r.h] });
+        text += r.text;
+      }
       return { text: text.toLowerCase(), runs, vt: page.getViewport({ scale: 1 }).transform };
     })();
     textCache.set(k, p);
@@ -67,6 +74,11 @@ function fraction(str: string, n: number): number {
 }
 
 function runRect(run: TextRun, from: number, to: number, vt: number[]): [number, number, number, number] {
+  if (run.box) {
+    const [bx, by, bw, bh] = run.box;
+    const f0 = fraction(run.str, from);
+    return [bx + bw * f0, by, bw * (fraction(run.str, to) - f0), bh];
+  }
   const [a, b, c, d, e, f] = run.tx;
   const ul = Math.hypot(a, b) || 1;
   const nl = Math.hypot(c, d) || 1;

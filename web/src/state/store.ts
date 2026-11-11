@@ -85,6 +85,17 @@ export interface Asset {
   h: number;
 }
 
+/** Un tratto di testo riconosciuto dall'OCR, in punti pagina (origine in alto
+ *  a sinistra, come le annotazioni). `base` è la y della linea di base. */
+export interface OcrRun {
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  base: number;
+}
+
 export type FormValue = string | string[];
 export type Tool = 'select' | 'text' | 'draw' | 'highlight' | 'rect';
 export type ZoomMode = 'fit-width' | 'fit-page' | 'custom';
@@ -111,6 +122,8 @@ export interface Toast {
 export interface State extends DocState {
   sources: Record<string, Source>;
   assets: Record<string, Asset>;
+  /** Testo riconosciuto dall'OCR, per pagina sorgente (`srcId:indice`). */
+  ocr: Record<string, OcrRun[]>;
   fileName: string;
   dirty: boolean;
   undo: DocState[];
@@ -160,6 +173,7 @@ const initial: State = {
   forms: {},
   sources: {},
   assets: {},
+  ocr: {},
   fileName: '',
   dirty: false,
   undo: [],

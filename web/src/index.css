@@ -126,3 +126,21 @@ body {
   min-width: 0.5em;
   min-height: 1.2em;
 }
+
+/* Testo riconosciuto dall'OCR: invisibile, serve a selezionare e copiare. */
+.ocrLayer span {
+  position: absolute;
+  color: transparent;
+  white-space: pre;
+  line-height: 1;
+  font-family: Helvetica, Arial, 'Liberation Sans', sans-serif;
+  cursor: text;
+  transform-origin: 0% 0%;
+  user-select: text;
+  pointer-events: auto;
+}
+
+.ocrLayer ::selection {
+  background: rgb(0 100 255 / 0.25);
+  color: transparent;
+}

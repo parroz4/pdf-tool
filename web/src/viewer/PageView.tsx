@@ -4,10 +4,40 @@
 import { lazy, memo, Suspense, useEffect, useRef, useState } from 'react';
 import { TextLayer } from 'pdfjs-dist';
 import { getCached, getPage, renderPage } from '../pdf/pdfjs';
-import { getState, useStore, type PageRef } from '../state/store';
+import { getState, useStore, type OcrRun, type PageRef } from '../state/store';
 
 const EditorLayer = lazy(() => import('../editor/EditorLayer'));
 const FormLayer = lazy(() => import('../editor/FormLayer'));
+
+const OCR_FONT = "Helvetica, Arial, 'Liberation Sans', sans-serif";
+let measureCtx: CanvasRenderingContext2D | null = null;
+
+/** Testo dell'OCR come livello invisibile sopra la scansione: ogni tratto è
+ *  stirato sulla larghezza che occupa nell'immagine, così la selezione combacia. */
+const OcrText = memo(function OcrText(props: { runs: OcrRun[]; w: number; h: number; scale: number }) {
+  measureCtx ??= document.createElement('canvas').getContext('2d');
+  const ctx = measureCtx;
+  return (
+    <div
+      className="ocrLayer pointer-events-none absolute top-0 left-0 origin-top-left"
+      style={{ width: props.w, height: props.h, transform: `scale(${props.scale})` }}
+    >
+      {props.runs.map((r, i) => {
+        let sx = 1;
+        if (ctx) {
+          ctx.font = `${r.h}px ${OCR_FONT}`;
+          const natural = ctx.measureText(r.text).width;
+          if (natural > 0) sx = r.w / natural;
+        }
+        return (
+          <span key={i} style={{ left: r.x, top: r.y, fontSize: r.h, transform: `scaleX(${sx})` }}>
+            {r.text}
+          </span>
+        );
+      })}
+    </div>
+  );
+});
 
 interface Props {
   page: PageRef;
@@ -18,6 +48,7 @@ interface Props {
 export const PageView = memo(function PageView({ page, scale, top }: Props) {
   const src = useStore((s) => s.sources[page.srcId]);
   const editorOn = useStore((s) => s.editorOn);
+  const ocr = useStore((s) => s.ocr[`${page.srcId}:${page.index}`]);
   const hits = useStore((s) => s.search.byPage[page.id]);
   const active = useStore((s) => (s.search.byPage[page.id] ? s.search.active : -1));
   const holder = useRef<HTMLDivElement>(null);
@@ -116,6 +147,7 @@ export const PageView = memo(function PageView({ page, scale, top }: Props) {
     >
       <div ref={holder} className="absolute inset-0 overflow-hidden" />
       <div ref={textRef} className="textLayer" />
+      {ocr && <OcrText runs={ocr} w={page.w} h={page.h} scale={scale} />}
       {/* Livello in moltiplicazione (evidenziazioni, risultati di ricerca): è
           l'intero livello a fondersi con il canvas, come farà il PDF esportato. */}
       <div

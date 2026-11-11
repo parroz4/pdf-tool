@@ -39,6 +39,10 @@ statici (i percorsi sono relativi, quindi funziona anche in una sottocartella).
 - caselle di testo (doppio clic per rimodificarle), colore e dimensione;
 - testo già presente nella pagina: doppio clic su una riga la trasforma in una
   casella modificabile (l'originale viene coperto, non rimosso dal file);
+- OCR (pulsante *OCR*, `Maiusc`+clic per tutte le pagine): riconosce il testo
+  delle scansioni con Tesseract, in italiano, dentro il browser. Il testo
+  riconosciuto si può selezionare, cercare e modificare con un doppio clic;
+  per ora non viene scritto nel PDF esportato come testo ricercabile;
 - disegno a mano libera, evidenziatore, rettangoli, con colore e spessore;
 - pagine: riordino trascinando le miniature, selezione multipla
   (`Ctrl`/`Maiusc`+clic), eliminazione (`Canc`);

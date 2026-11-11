@@ -18,6 +18,7 @@ const PATHS = {
   redo: 'M15 7l5 5-5 5M20 12H10a6 6 0 0 0 0 12h2',
   download: 'M12 4v11M7 11l5 5 5-5M5 20h14',
   trash: 'M5 7h14M10 7V4h4v3M7 7l1 13h8l1-13',
+  ocr: 'M4 8V5h3M17 5h3v3M20 16v3h-3M7 19H4v-3M8 10h8M8 14h5',
   close: 'M6 6l12 12M18 6L6 18',
 } as const;
 

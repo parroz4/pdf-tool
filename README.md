@@ -4,21 +4,31 @@ Visualizzatore ed editor PDF desktop leggero e veloce (stile SumatraPDF per
 la visualizzazione), scritto in Python con **PyMuPDF** (rendering/editing) e
 **PySide6** (UI).
 
-> **Versione web (novità).** Nella cartella [`web/`](web/) c'è un secondo
-> programma, indipendente da questo: un visualizzatore/editor PDF che gira
-> interamente nel browser, senza backend (Vite + React + TypeScript, pdf.js,
-> pdf-lib). Istruzioni, funzioni e stato delle verifiche sono in
-> [`web/README.md`](web/README.md). In breve:
+> **Versione web e app desktop per Windows (novità).** Nella cartella
+> [`web/`](web/) c'è un secondo programma, indipendente da questo: un
+> visualizzatore/editor PDF scritto con Vite + React + TypeScript, pdf.js e
+> pdf-lib, che lavora tutto in locale, senza backend. Oltre a visualizzare e
+> annotare, permette di **modificare il testo già presente** nella pagina
+> (doppio clic) e di fare l'**OCR** delle scansioni (Tesseract, in italiano).
 >
-> ```bash
-> cd web
-> npm install
-> npm run dev      # sviluppo
-> npm run build    # build di produzione in web/dist
-> ```
+> Si usa in due modi:
 >
-> Il resto di questo README descrive l'app desktop in Python, che non è stata
-> modificata.
+> - **come programma installabile per Windows**: scarica
+>   `PDF-Tool-Setup-<versione>.exe` dalla pagina
+>   [Releases](https://github.com/parroz4/pdf-tool/releases/latest) e avvialo. L'installer non è firmato,
+>   quindi Windows SmartScreen può mostrare un avviso al primo avvio;
+> - **nel browser**, per lo sviluppo:
+>
+>   ```bash
+>   cd web
+>   npm install
+>   npm run dev        # sviluppo, http://localhost:5173
+>   npm run dist:win   # crea l'installer in web/release
+>   ```
+>
+> Istruzioni, funzioni, limiti e stato delle verifiche sono in
+> [`web/README.md`](web/README.md). Il resto di questo README descrive l'app
+> desktop in Python, che non è stata modificata.
 
 Tre modalità di visualizzazione (`Ctrl+6/7/8`, come SumatraPDF):
 
@@ -154,6 +164,8 @@ installazione, avviabile da cartella/chiavetta):
 - **Con GitHub Actions**: pubblicando il repo su GitHub, il workflow
   `.github/workflows/build-windows.yml` produce l'artifact
   `PDFTool-windows-portable` (avvio manuale da Actions o push di un tag `v*`).
+  Sui tag `v*` lo stesso workflow costruisce anche l'installer dell'app
+  desktop della versione web e pubblica entrambi i file in una Release.
 
 La build è in modalità *onedir* (cartella) e non *onefile*: il singolo `.exe`
 autoestraente costerebbe secondi a ogni avvio, contro l'obiettivo di velocità.

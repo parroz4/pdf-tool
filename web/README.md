@@ -31,6 +31,9 @@ npm run desktop    # build + avvio dell'app desktop, senza installare
 npm run dist:win   # crea l'installer in web/release/PDF-Tool-Setup-<versione>.exe
 ```
 
+L'installer pronto si scarica dalla pagina Releases del repository: viene
+costruito da GitHub Actions a ogni tag `v*`.
+
 L'installer non è firmato: al primo avvio Windows SmartScreen può mostrare un
 avviso. I PDF protetti da password non si aprono nell'app desktop (manca la
 finestra di richiesta della password).

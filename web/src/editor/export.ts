@@ -161,6 +161,16 @@ function drawAnnots(
             'Alcuni caratteri di una casella di testo non sono supportati dal font standard e sono stati sostituiti con «?».',
           );
         }
+        if (a.cover) {
+          // Testo stampato sostituito: l'originale viene coperto.
+          page.drawRectangle({
+            x: a.cover.x,
+            y: height - a.cover.y - a.cover.h,
+            width: a.cover.w,
+            height: a.cover.h,
+            color: hex(a.cover.color),
+          });
+        }
         page.drawText(text, {
           x: a.x,
           y: height - a.y - a.size * BASELINE,

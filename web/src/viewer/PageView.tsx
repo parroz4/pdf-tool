@@ -4,7 +4,7 @@
 import { lazy, memo, Suspense, useEffect, useRef, useState } from 'react';
 import { TextLayer } from 'pdfjs-dist';
 import { getCached, getPage, renderPage } from '../pdf/pdfjs';
-import { useStore, type PageRef } from '../state/store';
+import { getState, useStore, type PageRef } from '../state/store';
 
 const EditorLayer = lazy(() => import('../editor/EditorLayer'));
 const FormLayer = lazy(() => import('../editor/FormLayer'));
@@ -87,9 +87,22 @@ export const PageView = memo(function PageView({ page, scale, top }: Props) {
   const w = page.w * scale;
   const h = page.h * scale;
 
+  // Doppio clic su un testo stampato: diventa una casella modificabile.
+  const onDoubleClick = (e: React.MouseEvent<HTMLDivElement>): void => {
+    if (!src || getState().tool !== 'select') return;
+    if ((e.target as HTMLElement).closest('[data-annot], input, textarea, select')) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const x = (e.clientX - r.left) / scale;
+    const y = (e.clientY - r.top) / scale;
+    void import('../editor/editText')
+      .then((m) => m.editTextAt(page, src, x, y))
+      .catch((err) => console.error('Modifica del testo non riuscita', err));
+  };
+
   return (
     <div
       data-page-id={page.id}
+      onDoubleClick={onDoubleClick}
       className="page absolute right-0 left-0 mx-auto bg-white shadow-md"
       style={
         {

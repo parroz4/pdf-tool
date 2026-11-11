@@ -1,7 +1,7 @@
 // Livello di editing di una pagina (chunk lazy): mostra le annotazioni e
 // gestisce creazione, selezione, spostamento e ridimensionamento.
 // Vive dentro un contenitore già scalato: qui tutte le misure sono in punti.
-import { useLayoutEffect, useRef, useState } from 'react';
+import { Fragment, useLayoutEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   addAnnot,
@@ -130,7 +130,9 @@ function TextEditor({ a, pageId }: { a: TextAnnot; pageId: string }) {
     if (done.current) return;
     done.current = true;
     const text = (ref.current?.innerText ?? '').replace(/\r/g, '').replace(/\n$/, '');
-    if (text.trim() === '') {
+    // Una casella che sostituisce testo stampato resta anche vuota: così il
+    // testo originale rimane coperto (cioè cancellato).
+    if (text.trim() === '' && !a.cover) {
       if (a.text !== '') checkpoint();
       removeAnnot(pageId, a.id);
     } else if (text !== a.text) {
@@ -408,27 +410,54 @@ export default function EditorLayer({
           </div>
         );
       }
-      case 'text':
-        if (a.id === editingText) return <TextEditor key={a.id} a={a} pageId={page.id} />;
-        return (
+      case 'text': {
+        // Copre il testo originale della pagina che questa casella sostituisce.
+        const cover = a.cover && (
           <div
-            key={a.id}
-            {...common}
-            className={`annot-text absolute cursor-move select-none ${sel ? 'annot-selected' : ''}`}
+            data-cover={a.id}
+            className="pointer-events-none absolute"
             style={{
-              left: a.x,
-              top: a.y,
-              fontSize: a.size,
-              color: a.color,
-              pointerEvents: interactive || tool === 'text' ? 'auto' : 'none',
+              left: a.cover.x,
+              top: a.cover.y,
+              width: a.cover.w,
+              height: a.cover.h,
+              background: a.cover.color,
             }}
-            onDoubleClick={() =>
-              setState({ selected: { pageId: page.id, id: a.id }, editingText: a.id })
-            }
-          >
-            {a.text}
-          </div>
+          />
         );
+        if (a.id === editingText) {
+          return (
+            <Fragment key={a.id}>
+              {cover}
+              <TextEditor a={a} pageId={page.id} />
+            </Fragment>
+          );
+        }
+        return (
+          <Fragment key={a.id}>
+            {cover}
+            <div
+              {...common}
+              className={`annot-text absolute cursor-move select-none ${sel ? 'annot-selected' : ''}`}
+              style={{
+                left: a.x,
+                top: a.y,
+                fontSize: a.size,
+                color: a.color,
+                // una casella svuotata resta afferrabile
+                minWidth: a.cover && a.text === '' ? a.cover.w : undefined,
+                pointerEvents: interactive || tool === 'text' ? 'auto' : 'none',
+              }}
+              onDoubleClick={(e) => {
+                e.stopPropagation();
+                setState({ selected: { pageId: page.id, id: a.id }, editingText: a.id });
+              }}
+            >
+              {a.text}
+            </div>
+          </Fragment>
+        );
+      }
     }
   };
 

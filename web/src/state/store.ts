@@ -42,6 +42,9 @@ export interface TextAnnot {
   text: string;
   size: number;
   color: string;
+  /** Presente quando la casella sostituisce un testo già stampato sulla
+   *  pagina: l'area originale viene coperta con il colore di fondo. */
+  cover?: { x: number; y: number; w: number; h: number; color: string };
 }
 export interface InkAnnot {
   id: string;

@@ -37,6 +37,8 @@ statici (i percorsi sono relativi, quindi funziona anche in una sottocartella).
 - immagini: dal pulsante, trascinate sulla pagina o incollate (`Ctrl+V`);
   spostabili e ridimensionabili;
 - caselle di testo (doppio clic per rimodificarle), colore e dimensione;
+- testo già presente nella pagina: doppio clic su una riga la trasforma in una
+  casella modificabile (l'originale viene coperto, non rimosso dal file);
 - disegno a mano libera, evidenziatore, rettangoli, con colore e spessore;
 - pagine: riordino trascinando le miniature, selezione multipla
   (`Ctrl`/`Maiusc`+clic), eliminazione (`Canc`);
